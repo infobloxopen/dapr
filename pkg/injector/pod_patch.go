@@ -467,9 +467,8 @@ func getSidecarContainer(annotations map[string]string, id, daprSidecarImage, na
 	httpHandler := getProbeHTTPHandler(sidecarHTTPPort, apiVersionV1, sidecarHealthzPath)
 
 	c := &corev1.Container{
-		Name:            sidecarContainerName,
-		Image:           daprSidecarImage,
-		ImagePullPolicy: corev1.PullAlways,
+		Name:  sidecarContainerName,
+		Image: daprSidecarImage,
 		Ports: []corev1.ContainerPort{
 			{
 				ContainerPort: int32(sidecarHTTPPort),
