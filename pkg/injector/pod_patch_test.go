@@ -94,7 +94,7 @@ func TestGetSideCarContainer(t *testing.T) {
 	annotations[daprLogAsJSON] = "true"
 	annotations[daprAPITokenSecret] = "secret"
 
-	container, _ := getSidecarContainer(annotations, "app_id", "darpio/dapr", "dapr-system", "controlplane:9000", "placement:50000", nil, "", "", "", "sentry:50000", true, "pod_identity")
+	container, _ := getSidecarContainer(annotations, "app_id", "darpio/dapr", "Always", "dapr-system", "controlplane:9000", "placement:50000", nil, "", "", "", "sentry:50000", true, "pod_identity")
 
 	var expectedArgs = []string{
 		"--mode", "kubernetes",
@@ -116,6 +116,7 @@ func TestGetSideCarContainer(t *testing.T) {
 
 	assert.Equal(t, "secret", container.Env[2].ValueFrom.SecretKeyRef.Name)
 	assert.EqualValues(t, expectedArgs, container.Args)
+	assert.Equal(t, corev1.PullAlways, container.ImagePullPolicy)
 }
 
 func TestAddDaprEnvVarsToContainers(t *testing.T) {

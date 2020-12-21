@@ -171,7 +171,8 @@ func (i *injector) handleRequest(w http.ResponseWriter, r *http.Request) {
 			err = errors.Wrapf(err, "invalid kind for review: %s", ar.Kind)
 			log.Error(err)
 		} else {
-			patchOps, err = i.getPodPatchOperations(&ar, i.config.Namespace, i.config.SidecarImage, i.kubeClient, i.daprClient)
+			patchOps, err = i.getPodPatchOperations(&ar, i.config.Namespace, i.config.SidecarImage,
+				i.config.SidecarImagePullPolicy, i.kubeClient, i.daprClient)
 		}
 	}
 
