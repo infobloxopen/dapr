@@ -114,7 +114,7 @@ jobs:
       ARTIFACT_DIR: ./release
       HELM_PACKAGE_DIR: helm
       DAPR_VERSION_ARTIFACT: dapr_version
-      DOCKER_REGISTRY: smanjunath2
+      DOCKER_REGISTRY: infoblox
       #DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
       HELMVER: v3.2.1
     runs-on: ubuntu-latest
