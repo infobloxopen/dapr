@@ -67,9 +67,9 @@ check-docker-env:
 ifeq ($(DAPR_REGISTRY),)
 	$(error DAPR_REGISTRY environment variable must be set)
 endif
-ifeq ($(DAPR_TAG),)
-	$(error DAPR_TAG environment variable must be set)
-endif
+#ifeq ($(DAPR_TAG),)
+#	$(error DAPR_TAG environment variable must be set)
+#endif
 
 check-arch:
 ifeq ($(TARGET_OS),)
