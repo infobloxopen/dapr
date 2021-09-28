@@ -105,6 +105,7 @@ jobs:
         if: matrix.target_os != 'darwin' && github.event_name != 'pull_request'
         run: |
           echo "Build docker image and push image..."
+          echo ${{ env.REL_VERSION }}
           make docker-push TARGET_OS=${{ matrix.target_os }} TARGET_ARCH=${{ matrix.target_arch }} DAPR_REGISTRY=${{ secrets.DOCKER_REGISTRY }} DAPR_TAG=${{ env.REL_VERSION }}
   publish:
     name: Publish docker image and binaries
