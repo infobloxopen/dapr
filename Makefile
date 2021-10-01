@@ -10,7 +10,17 @@
 export GO111MODULE ?= on
 export GOPROXY ?= https://proxy.golang.org
 export GOSUMDB ?= sum.golang.org
+##############srilakshmi#########################################################
 
+PROJECT_ROOT := smanjunath2/dapr
+REPO         := smanjunath2
+GITHUB_REPO  := git@github.com:srilakshmimanjunath2
+
+
+
+
+
+#################end srilakshmi##################################################
 GIT_COMMIT  = $(shell git rev-list -1 HEAD)
 GIT_VERSION = $(shell git describe --always --abbrev=7 --dirty)
 # By default, disable CGO_ENABLED. See the details on https://golang.org/cmd/cgo
@@ -86,6 +96,101 @@ HELM_CHART_DIR:=$(HELM_CHART_ROOT)/dapr
 HELM_OUT_DIR:=$(OUT_DIR)/install
 HELM_MANIFEST_FILE:=$(HELM_OUT_DIR)/$(RELEASE_NAME).yaml
 HELM_REGISTRY?=daprio.azurecr.io
+##############################################################################
+#   srilakshmi                                                               #
+##############################################################################
+# Docker image build and push setting
+DOCKER:=docker
+DAPR_SYSTEM_IMAGE_NAME=$(RELEASE_NAME)
+DAPR_RUNTIME_IMAGE_NAME=daprd
+DAPR_PLACEMENT_IMAGE_NAME=placement
+DAPR_SENTRY_IMAGE_NAME=sentry
+
+# build docker image for linux
+BIN_PATH=$(OUT_DIR)/$(TARGET_OS)_$(TARGET_ARCH)
+
+ifeq ($(TARGET_OS), windows)
+  DOCKERFILE:=Dockerfile-windows
+  BIN_PATH := $(BIN_PATH)/release
+else ifeq ($(origin DEBUG), undefined)
+  DOCKERFILE:=Dockerfile
+  BIN_PATH := $(BIN_PATH)/release
+else ifeq ($(DEBUG),0)
+  DOCKERFILE:=Dockerfile
+  BIN_PATH := $(BIN_PATH)/release
+else
+  DOCKERFILE:=Dockerfile-debug
+  BIN_PATH := $(BIN_PATH)/debug
+endif
+
+ifeq ($(TARGET_ARCH),arm)
+  DOCKER_IMAGE_PLATFORM:=$(TARGET_OS)/arm/v7
+else ifeq ($(TARGET_ARCH),arm64)
+  DOCKER_IMAGE_PLATFORM:=$(TARGET_OS)/arm64/v8
+else
+  DOCKER_IMAGE_PLATFORM:=$(TARGET_OS)/amd64
+endif
+
+# Supported docker image architecture
+DOCKERMUTI_ARCH=linux-amd64 linux-arm linux-arm64 windows-amd64
+
+################################################################################
+# Target: docker-build, docker-push                                            #
+################################################################################
+# configuration for image names
+USERNAME		:= $(USERNAME)
+GIT_COMMIT		:= $(shell git describe --tags --dirty=-unsupported --always || echo pre-commit)
+IMAGE_VERSION ?= $(GIT_COMMIT)-j$(BUILD_NUMBER)
+TAG_LATEST    ?= latest
+#BUILD_PATH		:= bin
+DOCKERFILE_DIR := $(CURDIR)/docker
+#BUILD_NUMBER       ?= 0
+
+
+
+LINUX_BINS_OUT_DIR=$(OUT_DIR)/linux_$(GOARCH)
+DOCKER_IMAGE_TAG=$(REPO)/$(DAPR_SYSTEM_IMAGE_NAME):$(IMAGE_VERSION)
+DAPR_RUNTIME_DOCKER_IMAGE_TAG=$(REPO)/$(DAPR_RUNTIME_IMAGE_NAME):$(IMAGE_VERSION)
+DAPR_PLACEMENT_DOCKER_IMAGE_TAG=$(REPO)/$(DAPR_PLACEMENT_IMAGE_NAME):$(IMAGE_VERSION)
+DAPR_SENTRY_DOCKER_IMAGE_TAG=$(REPO)/$(DAPR_SENTRY_IMAGE_NAME):$(IMAGE_VERSION)
+
+ifeq ($(LATEST_RELEASE),true)
+DOCKER_IMAGE_LATEST_TAG=$(REPO)/$(DAPR_SYSTEM_IMAGE_NAME):$(LATEST_TAG)
+DAPR_RUNTIME_DOCKER_IMAGE_LATEST_TAG=$(REPO)/$(DAPR_RUNTIME_IMAGE_NAME):$(LATEST_TAG)
+DAPR_PLACEMENT_DOCKER_IMAGE_LATEST_TAG=$(REPO)/$(DAPR_PLACEMENT_IMAGE_NAME):$(LATEST_TAG)
+DAPR_SENTRY_DOCKER_IMAGE_LATEST_TAG=$(REPO)/$(DAPR_SENTRY_IMAGE_NAME):$(LATEST_TAG)
+endif
+
+# configuration for server binary and image
+#DAPR_SERVER_BINARY 		:= $(BUILD_PATH)/server
+#SERVER_PATH		:= $(PROJECT_ROOT)/cmd/server
+#SERVER_IMAGE		:= $(REPO)/atlas.onprem.health-collector
+#SERVER_DOCKERFILE	:= $(DAPR_DOCKERFILE_PATH)/Dockerfile
+
+# configuration for the protobuf gentool
+#SRCROOT_ON_HOST		:= $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
+#SRCROOT_IN_CONTAINER	:= /go/src/$(PROJECT_ROOT)
+#DOCKER_RUNNER    	:= docker run -u `id -u`:`id -g` --rm
+#DOCKER_RUNNER		+= -v $(SRCROOT_ON_HOST):$(SRCROOT_IN_CONTAINER)
+#DOCKER_GENERATOR	:= infoblox/atlas-gentool:latest
+#GENERATOR		:= $(DOCKER_RUNNER) $(DOCKER_GENERATOR
+
+
+
+
+
+
+
+
+##############################################################################
+#end srilakshmi                                                              #
+##############################################################################
+
+
+
+
+
+
 
 
 ################################################################################
@@ -229,6 +334,18 @@ test:
 lint:
 	$(GOLANGCI_LINT) run --timeout=20m
 
+#############srilakshmi#######################################################
+.PHONY: docker
+docker:
+	@docker build --build-arg PKG_FILES=* -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(BIN_PATH) -t $(DOCKER_IMAGE_TAG)-$(TARGET_OS)-$(TARGET_ARCH)
+	@docker build --build-arg PKG_FILES=daprd -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(BIN_PATH) -t $(DAPR_RUNTIME_DOCKER_IMAGE_TAG)-$(TARGET_OS)-$(TARGET_ARCH)
+	@docker build --build-arg PKG_FILES=placement -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(BIN_PATH) -t $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG)-$(TARGET_OS)-$(TARGET_ARCH)
+	@docker build --build-arg PKG_FILES=sentry -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(BIN_PATH) -t $(DAPR_SENTRY_DOCKER_IMAGE_TAG)-$(TARGET_OS)-$(TARGET_ARCH)
+
+
+
+##################end srilakshmi##############################################
+
 ################################################################################
 # Target: modtidy                                                              #
 ################################################################################
@@ -242,6 +359,28 @@ modtidy:
 .PHONY: init-proto
 init-proto:
 	go get google.golang.org/protobuf/cmd/protoc-gen-go@v1.25.0 google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.1.0
+
+
+###########srilakshmi###########################################################
+#.PHONY: clean
+#clean:
+#	@docker rmi -f $(shell docker images -q $(SERVER_IMAGE)) || true
+
+.PHONY: push
+push: docker
+	@docker) push $(DOCKER_IMAGE_TAG)-$(TARGET_OS)-$(TARGET_ARCH)
+	@docker push $(DAPR_RUNTIME_DOCKER_IMAGE_TAG)-$(TARGET_OS)-$(TARGET_ARCH)
+	@docker push $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG)-$(TARGET_OS)-$(TARGET_ARCH)
+	@docker push $(DAPR_SENTRY_DOCKER_IMAGE_TAG)-$(TARGET_OS)-$(TARGET_ARCH)
+
+
+
+
+
+
+
+
+#################end srilakshmi##################################################
 
 ################################################################################
 # Target: gen-proto                                                            #
@@ -287,7 +426,7 @@ include tools/codegen.mk
 ################################################################################
 # Target: docker                                                               #
 ################################################################################
-include docker/docker.mk
+#include docker/docker.mk
 
 ################################################################################
 # Target: tests                                                                #
