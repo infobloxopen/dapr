@@ -13,7 +13,7 @@ pipeline {
   environment {
     GOPATH = "$WORKSPACE"
     DIRECTORY = "src/github.com/srilakshmimanjunath2/dapr"
-    DOCKER_IMAGE = "smanjunath2/dapr"
+    DOCKER_IMAGE = "smanjunath2"
   }
   stages {
     stage("Setup") {
