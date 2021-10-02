@@ -12,9 +12,9 @@ export GOPROXY ?= https://proxy.golang.org
 export GOSUMDB ?= sum.golang.org
 ##############srilakshmi#########################################################
 
-PROJECT_ROOT := smanjunath2/dapr
-REPO         := smanjunath2
-GITHUB_REPO  := git@github.com:srilakshmimanjunath2
+PROJECT_ROOT := infobloxopen/dapr
+REPO         := infobloxopen
+GITHUB_REPO  := git@github.com:infobloxopen
 
 
 
