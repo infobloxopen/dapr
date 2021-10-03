@@ -7,8 +7,8 @@ pipeline {
   tools {
     go "Go 1.12"
   }
-  options {
-    checkoutToSubdirectory('src/github.com/infobloxopen/dapr')
+    options {
+        checkoutToSubdirectory('src/github.com/infobloxopen/dapr')
   }
   environment {
     GOPATH = "$WORKSPACE"
