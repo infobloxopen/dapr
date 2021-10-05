@@ -21,16 +21,6 @@ pipeline {
         prepareBuild()
       }
     }
-    stage("Lint") {
-      steps {
-        sh "cd $DIRECTORY && make fmt && git diff --exit-code > /dev/null"
-      }
-    }
-    stage("Test") {
-      steps {
-        sh "cd $DIRECTORY && make test"
-      }
-    }
     stage("Build") {
        steps {
         withDockerRegistry([credentialsId: "dockerhub-bloxcicd", url: ""]) {
