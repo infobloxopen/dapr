@@ -77,6 +77,8 @@ spec:
 {{- end }}
         - "--metrics-port"
         - "{{ .Values.global.prometheus.port }}"
+        - "--public-server"
+        - "{{ .Values.host.cpNoa.domain | required "set host.cpNoa.domain" | quote }}"
         env:
         - name: TLS_CERT_FILE
           value: /dapr/cert/tls.crt

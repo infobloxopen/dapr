@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"net"
 	"os"
 
@@ -18,9 +19,14 @@ func GetHostAddress() (string, error) {
 		return val, nil
 	}
 
+	publicLookupAddr, ok := os.LookupEnv("public-server")
+	if !ok {
+		publicLookupAddr = "cp.noa.infoblox.com"
+	}
+
 	// Use udp so no handshake is made.
 	// Any IP can be used, since connection is not established, but we used a known DNS IP.
-	conn, err := net.Dial("udp", "8.8.8.8:80")
+	conn, err := net.Dial("udp", fmt.Sprintf("%s:80", publicLookupAddr))
 	if err != nil {
 		// Could not find one via a  UDP connection, so we fallback to the "old" way: try first non-loopback IPv4:
 		addrs, err := net.InterfaceAddrs()
