@@ -7,6 +7,7 @@ package operator
 
 import (
 	"context"
+	"time"
 
 	componentsapi "github.com/dapr/dapr/pkg/apis/components/v1alpha1"
 	configurationapi "github.com/dapr/dapr/pkg/apis/configuration/v1alpha1"
@@ -63,11 +64,15 @@ func init() {
 
 // NewOperator returns a new Dapr Operator
 func NewOperator(config, certChainPath string, enableLeaderElection bool) Operator {
+	leaseDuration := 30 * time.Second
+	renewDeadline := 20 * time.Second
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:             scheme,
 		MetricsBindAddress: "0",
 		LeaderElection:     enableLeaderElection,
 		LeaderElectionID:   "operator.dapr.io",
+		LeaseDuration:      &leaseDuration,
+		RenewDeadline:      &renewDeadline,
 	})
 	if err != nil {
 		log.Fatal("unable to start manager")
