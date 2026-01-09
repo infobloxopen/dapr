@@ -311,3 +311,10 @@ clean:
 test:
 	go test ./pkg/... $(COVERAGE_OPTS)
 	go test ./tests/...
+
+.PHONY: list-of-images
+list-of-images:
+	@echo $(DOCKER_IMAGE_TAG)
+	@echo $(DAPR_RUNTIME_DOCKER_IMAGE_TAG)
+	@echo $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG)
+	@echo $(DAPR_SENTRY_DOCKER_IMAGE_TAG)
