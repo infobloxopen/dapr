@@ -16,6 +16,9 @@ REPO         := infoblox
 GITHUB_REPO  := git@github.com:infobloxopen
 WINDOWS_VERSION :=1809
 
+# Harbor registry configuration
+HARBOR_REGISTRY ?= harbor.services.sdp.infoblox.com/infobloxcto
+
 
 GIT_COMMIT  = $(shell git describe --tag --dirty=-unsupported --always || echo pre-commit)
 GIT_VERSION = $(shell git describe --always --abbrev=7 )
@@ -82,6 +85,9 @@ HELM_CHART_ROOT:=./charts
 HELM_CHART_DIR:=$(HELM_CHART_ROOT)/dapr
 HELM_OUT_DIR:=$(OUT_DIR)/install
 HELM_MANIFEST_FILE:=$(HELM_CHART_ROOT)/manifest/$(RELEASE_NAME).yaml
+CHART_NAME:=dapr
+CHART_VERSION:=$(DAPR_VERSION)
+CHART_FILE:=$(CHART_NAME)-$(CHART_VERSION).tgz
 
 ################################################################################
 # Go build details                                                             #
@@ -179,6 +185,12 @@ DAPR_PLACEMENT_DOCKER_IMAGE_TAG=$(REPO)/$(DAPR_PLACEMENT_DOCKER_IMAGE_NAME):$(DA
 DAPR_SENTRY_DOCKER_IMAGE_NAME=sentry
 DAPR_SENTRY_DOCKER_IMAGE_TAG=$(REPO)/$(DAPR_SENTRY_DOCKER_IMAGE_NAME):$(DAPR_VERSION)
 
+# Harbor image tags
+HARBOR_IMAGE_TAG=$(HARBOR_REGISTRY)/$(RELEASE_NAME):$(DAPR_VERSION)
+HARBOR_RUNTIME_IMAGE_TAG=$(HARBOR_REGISTRY)/$(DAPR_RUNTIME_DOCKER_IMAGE_NAME):$(DAPR_VERSION)
+HARBOR_PLACEMENT_IMAGE_TAG=$(HARBOR_REGISTRY)/$(DAPR_PLACEMENT_DOCKER_IMAGE_NAME):$(DAPR_VERSION)
+HARBOR_SENTRY_IMAGE_TAG=$(HARBOR_REGISTRY)/$(DAPR_SENTRY_DOCKER_IMAGE_NAME):$(DAPR_VERSION)
+
 ifeq ($(LATEST_RELEASE),true)
 DOCKER_IMAGE_LATEST_TAG=$(REPO)/$(RELEASE_NAME):$(LATEST_TAG)
 DAPR_RUNTIME_DOCKER_IMAGE_LATEST_TAG=$(DAPR_RUNTIME_DOCKER_IMAGE_TAG):$(LATEST_TAG)
@@ -222,13 +234,13 @@ endif
 # push docker image to the registry
 docker-push: check-arch-platform docker-build
 ifeq ($(GOARCH),amd64)
-	$(info Pushing $(DOCKER_IMAGE_TAG) docker image ...)
+	$(info Pushing $(DOCKER_IMAGE_TAG) docker image to DockerHub...)
 	$(DOCKER) push $(DOCKER_IMAGE_TAG)
-	$(info Pushing $(DAPR_RUNTIME_DOCKER_IMAGE_TAG) docker image ...)
+	$(info Pushing $(DAPR_RUNTIME_DOCKER_IMAGE_TAG) docker image to DockerHub...)
 	$(DOCKER) push $(DAPR_RUNTIME_DOCKER_IMAGE_TAG)
-	$(info Pushing $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG) docker image ...)
+	$(info Pushing $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG) docker image to DockerHub...)
 	$(DOCKER) push $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG)
-	$(info Pushing $(DAPR_SENTRY_DOCKER_IMAGE_TAG) docker image ...)
+	$(info Pushing $(DAPR_SENTRY_DOCKER_IMAGE_TAG) docker image to DockerHub...)
 	$(DOCKER) push $(DAPR_SENTRY_DOCKER_IMAGE_TAG)
 else
 	-$(DOCKER) buildx create --use --name daprbuild
@@ -245,6 +257,22 @@ ifeq ($(LATEST_RELEASE),true)
 	$(DOCKER) push $(DAPR_PLACEMENT_DOCKER_IMAGE_LATEST_TAG)
 	$(DOCKER) push $(DAPR_SENTRY_DOCKER_IMAGE_LATEST_TAG)
 endif
+
+# push docker images to Harbor registry (requires separate Harbor authentication)
+docker-push-harbor: docker-build
+	$(info Tagging and pushing to Harbor registry...)
+	$(DOCKER) tag $(DOCKER_IMAGE_TAG) $(HARBOR_IMAGE_TAG)
+	$(DOCKER) tag $(DAPR_RUNTIME_DOCKER_IMAGE_TAG) $(HARBOR_RUNTIME_IMAGE_TAG)
+	$(DOCKER) tag $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG) $(HARBOR_PLACEMENT_IMAGE_TAG)
+	$(DOCKER) tag $(DAPR_SENTRY_DOCKER_IMAGE_TAG) $(HARBOR_SENTRY_IMAGE_TAG)
+	$(info Pushing $(HARBOR_IMAGE_TAG) docker image to Harbor...)
+	$(DOCKER) push $(HARBOR_IMAGE_TAG)
+	$(info Pushing $(HARBOR_RUNTIME_IMAGE_TAG) docker image to Harbor...)
+	$(DOCKER) push $(HARBOR_RUNTIME_IMAGE_TAG)
+	$(info Pushing $(HARBOR_PLACEMENT_IMAGE_TAG) docker image to Harbor...)
+	$(DOCKER) push $(HARBOR_PLACEMENT_IMAGE_TAG)
+	$(info Pushing $(HARBOR_SENTRY_IMAGE_TAG) docker image to Harbor...)
+	$(DOCKER) push $(HARBOR_SENTRY_IMAGE_TAG)
 
 windows-version:
 ifeq ($(WINDOWS_VERSION),)
@@ -299,7 +327,7 @@ tidy:
 # Clean : clean                                                                #
 ################################################################################
 .PHONY:clean
-clean:
+clean: clean-chart
 	$(DOCKER) rmi -f $(shell docker images -q $(DOCKER_IMAGE_TAG))  || true
 	$(DOCKER) rmi -f $(shell docker images -q $(DAPR_RUNTIME_DOCKER_IMAGE_TAG)) || true
 	$(DOCKER) rmi -f $(shell docker images -q $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG)) || true
@@ -311,3 +339,33 @@ clean:
 test:
 	go test ./pkg/... $(COVERAGE_OPTS)
 	go test ./tests/...
+
+.PHONY: list-of-images
+list-of-images:
+	@echo $(DOCKER_IMAGE_TAG)
+	@echo $(DAPR_RUNTIME_DOCKER_IMAGE_TAG)
+	@echo $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG)
+	@echo $(DAPR_SENTRY_DOCKER_IMAGE_TAG)
+
+################################################################################
+# Target: Helm chart packaging                                                #
+################################################################################
+.PHONY: helm-lint
+helm-lint:
+	$(HELM) lint $(HELM_CHART_DIR)
+
+.PHONY: helm-archive
+helm-archive:
+	$(HELM) package -d $(HELM_CHART_ROOT) $(HELM_CHART_DIR) --version $(CHART_VERSION)
+
+.PHONY: helm-properties
+helm-properties: charts/tpl.helm.properties
+	@sed 's/{CHART_FILE}/$(CHART_FILE)/g' charts/tpl.helm.properties > charts/$(CHART_NAME).build.properties
+
+.PHONY: push-chart
+push-chart: helm-lint helm-archive helm-properties
+
+.PHONY: clean-chart
+clean-chart:
+	rm -f charts/*.build.properties
+	rm -f charts/*.tgz

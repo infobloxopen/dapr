@@ -5,7 +5,7 @@ pipeline {
     label 'ubuntu_docker_label'
   }
   tools {
-    go "Go 1.16"
+    go "Go 1.20"
   }
     options {
         checkoutToSubdirectory('src/github.com/infobloxopen/dapr')
@@ -20,6 +20,11 @@ pipeline {
     stage("Setup") {
       steps {
         prepareBuild()
+        withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GITHUB_PAT')]) {
+          dir("$DIRECTORY") {
+            sh 'git config --global url."https://\$GITHUB_PAT:x-oauth-basic@github.com/".insteadOf "https://github.com/"'
+          }
+        }
       }
     }
    stage("Test") {
@@ -34,18 +39,39 @@ pipeline {
       }
     stage("Build-And-Push-Docker") {
        steps {
-        withDockerRegistry([credentialsId: "dockerhub-bloxcicd", url: ""]) {
-          sh "cd $DIRECTORY && make docker-push GOOS='linux' GOARCH='amd64' "
-          
+        dir ("$DIRECTORY") {
+          withDockerRegistry([credentialsId: "dockerhub-bloxcicd", url: ""]) {
+            sh "make docker-push-harbor GOOS='linux' GOARCH='amd64'"
+          }
         }
       }
     }
-  
+    stage("Package-Helm-Chart") {
+      steps {
+        dir ("$DIRECTORY") {
+          sh "make push-chart"
+        }
+        dir("${WORKSPACE}/${DIRECTORY}") {
+          archiveArtifacts artifacts: 'charts/*.tgz'
+          archiveArtifacts artifacts: 'charts/*.build.properties'
+        }
+      }
+    }
   }
   post {
+    success {
+      dir("${WORKSPACE}/${DIRECTORY}"){
+        finalizeBuild("", "charts/*.build.properties")
+      }
+    }
     cleanup {
-     
-      sh "cd $DIRECTORY && make clean GOOS='linux' GOARCH='amd64'"
+      withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GITHUB_PAT')]) {
+        dir("$DIRECTORY") {
+          sh "make clean || true"
+          sh 'git config --global --unset url."https://$GITHUB_PAT:x-oauth-basic@github.com/".insteadOf'
+        }
+      }
+      cleanWs()
     }
   }
 }
