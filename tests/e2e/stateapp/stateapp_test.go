@@ -1,31 +1,46 @@
+//go:build e2e
 // +build e2e
 
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package stateapp_e2e
 
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
+	guuid "github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	apiv1 "k8s.io/api/core/v1"
+
 	"github.com/dapr/dapr/tests/e2e/utils"
 	kube "github.com/dapr/dapr/tests/platforms/kubernetes"
 	"github.com/dapr/dapr/tests/runner"
-	guuid "github.com/google/uuid"
-	"github.com/stretchr/testify/require"
 )
 
 const (
-	appName              = "stateapp" // App name in Dapr.
-	numHealthChecks      = 60         // Number of get calls before starting tests.
-	testManyEntriesCount = 5          // Anything between 1 and the number above (inclusive).
+	appName              = "stateapp"                       // App name in Dapr.
+	appNamePluggable     = "stateapp-pluggable"             // App name with pluggable components in Dapr.
+	redisPluggableApp    = "e2e-pluggable_redis-statestore" // The name of the pluggable component app.
+	numHealthChecks      = 60                               // Number of get calls before starting tests.
+	testManyEntriesCount = 5                                // Anything between 1 and the number above (inclusive).
 )
 
 type testCommandRequest struct {
@@ -57,7 +72,7 @@ type testStep struct {
 	expectedStatusCode int
 }
 
-//  stateTransactionRequest represents a request for state transactions
+// stateTransactionRequest represents a request for state transactions
 type stateTransaction struct {
 	Key           string    `json:"key,omitempty"`
 	Value         *appState `json:"value,omitempty"`
@@ -141,15 +156,10 @@ func generateTestCases(isHTTP bool) []testCase {
 	if isHTTP {
 		protocol = "http"
 	}
-	// Just for readability
-	emptyRequest := requestResponse{
-		nil,
-	}
 
 	// Just for readability
-	emptyResponse := requestResponse{
-		nil,
-	}
+	emptyRequest := requestResponse{}
+	emptyResponse := requestResponse{}
 
 	testCase1Key := guuid.New().String()
 	testCase1Value := "The best song ever is 'Highwayman' by 'The Highwaymen'."
@@ -265,17 +275,11 @@ func generateTestCases(isHTTP bool) []testCase {
 		},
 		{
 			// No comma since this will become the name of the test without spaces.
-			"Test data size edges (default 4MB) " + protocol,
+			"Test data size edges (1MB < limit < 4MB) " + protocol,
 			[]testStep{
 				{
 					"save",
 					generateSpecificLengthSample(1024 * 1024), // Less than limit
-					emptyResponse,
-					204,
-				},
-				{
-					"save",
-					generateSpecificLengthSample(1024*1024*3 - 55), // Exact limit
 					emptyResponse,
 					204,
 				},
@@ -301,17 +305,23 @@ func generateStateTransactionCases(protocolType string) testStateTransactionCase
 	testCase1Key, testCase2Key := guuid.New().String()+protocolType, guuid.New().String()+protocolType
 	testCase1Value := "The best song ever is 'Highwayman' by 'The Highwaymen'."
 	testCase2Value := "Hello World"
+
 	// Just for readability
-	emptyResponse := requestResponse{
-		nil,
-	}
+	emptyResponse := requestResponse{}
 
 	testStateTransactionCase := testStateTransactionCase{
 		[]stateTransactionTestStep{
 			{
+				// Transaction order should be tested in conformance tests: https://github.com/dapr/components-contrib/issues/1210
 				"transact",
 				newStateTransactionRequestResponse(
 					utils.StateTransactionKeyValue{testCase1Key, testCase1Value, "upsert"},
+				),
+				emptyResponse,
+			},
+			{
+				"transact",
+				newStateTransactionRequestResponse(
 					utils.StateTransactionKeyValue{testCase1Key, "", "delete"},
 					utils.StateTransactionKeyValue{testCase2Key, testCase2Value, "upsert"},
 				),
@@ -367,9 +377,26 @@ func generateSpecificLengthSample(sizeInBytes int) requestResponse {
 	}
 }
 
-var tr *runner.TestRunner
+var (
+	tr             *runner.TestRunner
+	stateStoreApps []struct {
+		name       string
+		stateStore string
+	} = []struct {
+		name       string
+		stateStore string
+	}{
+		{
+			name:       appName,
+			stateStore: "statestore",
+		},
+	}
+)
 
 func TestMain(m *testing.M) {
+	utils.SetupLogs("stateapp")
+	utils.InitHTTPClient(true)
+
 	// These apps will be deployed before starting actual test
 	// and will be cleaned up after all tests are finished automatically
 	testApps := []kube.AppDescription{
@@ -379,7 +406,32 @@ func TestMain(m *testing.M) {
 			ImageName:      "e2e-stateapp",
 			Replicas:       1,
 			IngressEnabled: true,
+			MetricsEnabled: true,
 		},
+	}
+
+	if utils.TestTargetOS() != "windows" { // pluggable components feature requires unix socket to work
+		testApps = append(testApps, kube.AppDescription{
+			AppName:        appNamePluggable,
+			DaprEnabled:    true,
+			ImageName:      "e2e-stateapp",
+			Replicas:       1,
+			IngressEnabled: true,
+			MetricsEnabled: true,
+			PluggableComponents: []apiv1.Container{
+				{
+					Name:  "redis-pluggable", // e2e-pluggable_redis
+					Image: runner.BuildTestImageName(redisPluggableApp),
+				},
+			},
+		})
+		stateStoreApps = append(stateStoreApps, struct {
+			name       string
+			stateStore string
+		}{
+			name:       appNamePluggable,
+			stateStore: "pluggable-statestore",
+		})
 	}
 
 	tr = runner.NewTestRunner(appName, testApps, nil, nil)
@@ -387,50 +439,53 @@ func TestMain(m *testing.M) {
 }
 
 func TestStateApp(t *testing.T) {
-	externalURL := tr.Platform.AcquireAppExternalURL(appName)
-	require.NotEmpty(t, externalURL, "external URL must not be empty!")
 	testCases := generateTestCases(true)                       // For HTTP
 	testCases = append(testCases, generateTestCases(false)...) // For gRPC
 
-	// This initial probe makes the test wait a little bit longer when needed,
-	// making this test less flaky due to delays in the deployment.
-	_, err := utils.HTTPGetNTimes(externalURL, numHealthChecks)
-	require.NoError(t, err)
+	for _, app := range stateStoreApps {
+		externalURL := tr.Platform.AcquireAppExternalURL(app.name)
+		require.NotEmpty(t, externalURL, "external URL must not be empty!")
 
-	// Now we are ready to run the actual tests
-	for _, tt := range testCases {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			for _, step := range tt.steps {
-				body, err := json.Marshal(step.request)
-				require.NoError(t, err)
+		// This initial probe makes the test wait a little bit longer when needed,
+		// making this test less flaky due to delays in the deployment.
+		_, err := utils.HTTPGetNTimes(externalURL, numHealthChecks)
+		require.NoError(t, err)
 
-				url := fmt.Sprintf("%s/test/%s/%s/statestore", externalURL, tt.protocol, step.command)
-
-				resp, statusCode, err := utils.HTTPPostWithStatus(url, body)
-				require.NoError(t, err)
-				require.Equal(t, step.expectedStatusCode, statusCode, url)
-
-				var appResp requestResponse
-				if statusCode != 204 {
-					err = json.Unmarshal(resp, &appResp)
-
+		// Now we are ready to run the actual tests
+		for _, tt := range testCases {
+			tt := tt
+			t.Run(fmt.Sprintf("%s-%s", tt.name, app.stateStore), func(t *testing.T) {
+				for _, step := range tt.steps {
+					body, err := json.Marshal(step.request)
 					require.NoError(t, err)
-				}
 
-				for _, er := range step.expectedResponse.States {
-					for _, ri := range appResp.States {
-						if er.Key == ri.Key {
-							require.True(t, reflect.DeepEqual(er.Key, ri.Key))
+					url := fmt.Sprintf("%s/test/%s/%s/%s", externalURL, tt.protocol, step.command, app.stateStore)
 
-							if er.Value != nil {
-								require.True(t, reflect.DeepEqual(er.Value.Data, ri.Value.Data))
+					resp, statusCode, err := utils.HTTPPostWithStatus(url, body)
+					require.NoError(t, err)
+					require.Equal(t, step.expectedStatusCode, statusCode, url)
+
+					var appResp requestResponse
+					if statusCode != 204 {
+						err = json.Unmarshal(resp, &appResp)
+
+						require.NoError(t, err)
+					}
+
+					for _, er := range step.expectedResponse.States {
+						for _, ri := range appResp.States {
+							if er.Key == ri.Key {
+								require.True(t, reflect.DeepEqual(er.Key, ri.Key))
+
+								if er.Value != nil {
+									require.True(t, reflect.DeepEqual(er.Value.Data, ri.Value.Data))
+								}
 							}
 						}
 					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
@@ -443,7 +498,7 @@ func TestStateTransactionApps(t *testing.T) {
 	_, err := utils.HTTPGetNTimes(externalURL, numHealthChecks)
 	require.NoError(t, err)
 
-	var transactionTests = []struct {
+	transactionTests := []struct {
 		protocol string
 		in       testStateTransactionCase
 	}{
@@ -476,6 +531,7 @@ func TestStateTransactionApps(t *testing.T) {
 					for _, ri := range appResp.States {
 						if er.Key == ri.Key {
 							require.Equal(t, er.Key, ri.Key)
+							require.Equal(t, er.Value != nil, ri.Value != nil)
 							if er.Value != nil {
 								require.True(t, reflect.DeepEqual(er.Value.Data, ri.Value.Data))
 							}
@@ -583,6 +639,77 @@ func TestMissingAndMisconfiguredStateStore(t *testing.T) {
 			require.Contains(t, string(resp), tc.errorMessage)
 			require.Equal(t, tc.status, status)
 			require.Nil(t, err)
+		})
+	}
+}
+
+func TestQueryStateStore(t *testing.T) {
+	externalURL := tr.Platform.AcquireAppExternalURL(appName)
+	require.NotEmpty(t, externalURL, "external URL must not be empty!")
+
+	// This initial probe makes the test wait a little bit longer when needed,
+	// making this test less flaky due to delays in the deployment.
+	_, err := utils.HTTPGetNTimes(externalURL, numHealthChecks)
+	require.NoError(t, err)
+
+	for _, storename := range []string{"querystatestore", "querystatestore2"} {
+		// Populate store.
+		body, err := os.ReadFile("query-data/dataset.json")
+		require.NoError(t, err)
+
+		url := fmt.Sprintf("%s/test/http/load/%s?contentType=application/json", externalURL, storename)
+		_, status, err := utils.HTTPPostWithStatus(url, body)
+		require.NoError(t, err)
+		require.Equal(t, 204, status)
+
+		tests := []struct {
+			path string
+			keys int
+		}{
+			{
+				path: "./query-data/query.json",
+				keys: 3,
+			},
+		}
+		for _, test := range tests {
+			body, err := os.ReadFile(test.path)
+			require.NoError(t, err)
+
+			for _, protocol := range []string{"http", "grpc"} {
+				url := fmt.Sprintf("%s/test/%s/query/%s?contentType=application/json&queryIndexName=orgIndx", externalURL, protocol, storename)
+				resp, status, err := utils.HTTPPostWithStatus(url, body)
+				require.NoError(t, err)
+				require.Equal(t, 200, status, "got response: "+string(resp))
+
+				var states requestResponse
+				err = json.Unmarshal(resp, &states)
+				require.NoError(t, err)
+				require.Equal(t, test.keys, len(states.States))
+			}
+		}
+	}
+}
+
+func TestEtags(t *testing.T) {
+	externalURL := tr.Platform.AcquireAppExternalURL(appName)
+	require.NotEmpty(t, externalURL, "external URL must not be empty!")
+
+	testCases := []struct {
+		protocol string
+	}{
+		{protocol: "http"},
+		{protocol: "grpc"},
+	}
+
+	// Now we are ready to run the actual tests
+	for _, tt := range testCases {
+		t.Run(fmt.Sprintf("Test Etags using %s protocol", tt.protocol), func(t *testing.T) {
+			url := strings.TrimSpace(fmt.Sprintf("%s/test-etag/%s/statestore", externalURL, tt.protocol))
+			resp, status, err := utils.HTTPPostWithStatus(url, nil)
+			require.NoError(t, err)
+
+			// The test passes with 204 if there's no error
+			assert.Equalf(t, http.StatusNoContent, status, "Test failed. Body is: %q", string(resp))
 		})
 	}
 }

@@ -1,7 +1,15 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package diagnostics
 
@@ -10,41 +18,78 @@ import (
 
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
+
+	"github.com/dapr/dapr/pkg/config"
+	"github.com/dapr/dapr/pkg/diagnostics/utils"
 )
 
-var (
-	// appIDKey is a tag key for App ID
-	appIDKey = tag.MustNewKey("app_id")
-)
+// appIDKey is a tag key for App ID.
+var appIDKey = tag.MustNewKey("app_id")
 
 var (
-	// DefaultReportingPeriod is the default view reporting period
+	// DefaultReportingPeriod is the default view reporting period.
 	DefaultReportingPeriod = 1 * time.Minute
 
-	// DefaultMonitoring holds service monitoring metrics definitions
+	// DefaultMonitoring holds service monitoring metrics definitions.
 	DefaultMonitoring = newServiceMetrics()
-	// DefaultGRPCMonitoring holds default gRPC monitoring handlers and middlewares
+	// DefaultGRPCMonitoring holds default gRPC monitoring handlers and middlewares.
 	DefaultGRPCMonitoring = newGRPCMetrics()
-	// DefaultHTTPMonitoring holds default HTTP monitoring handlers and middlewares
+	// DefaultHTTPMonitoring holds default HTTP monitoring handlers and middlewares.
 	DefaultHTTPMonitoring = newHTTPMetrics()
+	// DefaultComponentMonitoring holds component specific metrics.
+	DefaultComponentMonitoring = newComponentMetrics()
+	// DefaultResiliencyMonitoring holds resiliency specific metrics.
+	DefaultResiliencyMonitoring = newResiliencyMetrics()
+	// DefaultWorkflowMonitoring holds workflow specific metrics.
+	DefaultWorkflowMonitoring = newWorkflowMetrics()
+	// DefaultErrorCodeMonitoring holds error code specific metrics.
+	DefaultErrorCodeMonitoring = newErrorCodeMetrics()
 )
 
-// InitMetrics initializes metrics
-func InitMetrics(appID string) error {
-	if err := DefaultMonitoring.Init(appID); err != nil {
+// <<10 -> KBs; <<20 -> MBs; <<30 -> GBs
+var defaultSizeDistribution = view.Distribution(1<<10, 2<<10, 4<<10, 16<<10, 64<<10, 256<<10, 1<<20, 4<<20, 16<<20, 64<<20, 256<<20, 1<<30, 4<<30)
+
+// InitMetrics initializes metrics.
+func InitMetrics(meter view.Meter, appID, namespace string, metricSpec config.MetricSpec) error {
+	meter.Start()
+
+	latencyDistribution := metricSpec.GetLatencyDistribution(log)
+	if err := DefaultMonitoring.Init(meter, appID, latencyDistribution); err != nil {
 		return err
 	}
 
-	if err := DefaultGRPCMonitoring.Init(appID); err != nil {
+	if err := DefaultGRPCMonitoring.Init(meter, appID, latencyDistribution); err != nil {
 		return err
 	}
 
-	if err := DefaultHTTPMonitoring.Init(appID); err != nil {
+	httpConfig := NewHTTPMonitoringConfig(
+		metricSpec.GetHTTPPathMatching(),
+		metricSpec.GetHTTPIncreasedCardinality(log),
+		metricSpec.GetHTTPExcludeVerbs(),
+	)
+	if err := DefaultHTTPMonitoring.Init(meter, appID, httpConfig, latencyDistribution); err != nil {
 		return err
 	}
 
-	// Set reporting period of views
-	view.SetReportingPeriod(DefaultReportingPeriod)
+	if err := DefaultComponentMonitoring.Init(meter, appID, namespace, latencyDistribution); err != nil {
+		return err
+	}
 
-	return nil
+	if err := DefaultResiliencyMonitoring.Init(meter, appID); err != nil {
+		return err
+	}
+
+	if err := DefaultWorkflowMonitoring.Init(meter, appID, namespace, latencyDistribution); err != nil {
+		return err
+	}
+
+	if metricSpec.GetRecordErrorCodes() {
+		if err := DefaultErrorCodeMonitoring.Init(meter, appID); err != nil {
+			return err
+		}
+	}
+
+	// Set reporting period of views on the explicit meter
+	meter.SetReportingPeriod(DefaultReportingPeriod)
+	return utils.CreateRulesMap(metricSpec.Rules)
 }

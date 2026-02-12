@@ -1,6 +1,31 @@
+/*
+Copyright 2022 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 package perf
 
-import "time"
+import (
+	"os"
+	"time"
+
+	"github.com/dapr/dapr/tests/runner"
+)
+
+const (
+	githubRunID = "GITHUB_RUN_ID"
+	githubSHA   = "GITHUB_SHA"
+	githubREF   = "GITHUB_REF"
+)
 
 type TestResult struct {
 	RunType           string    `json:"RunType"`
@@ -72,29 +97,39 @@ type TestResult struct {
 }
 
 type TestReport struct {
-	Results     []TestResult `json:"Results"`
-	TestName    string       `json:"TestName"`
-	GitHubSHA   string       `json:"GitHubSHA,omitempty"`
-	GitHubREF   string       `json:"GitHubREF,omitempty"`
-	GitHubRunID string       `json:"GitHubRunID,omitempty"`
-	Metrics     testMetrics  `json:"Metrics"`
+	Results     []TestResult           `json:"Results"`
+	TestName    string                 `json:"TestName"`
+	GitHubSHA   string                 `json:"GitHubSHA,omitempty"`
+	GitHubREF   string                 `json:"GitHubREF,omitempty"`
+	GitHubRunID string                 `json:"GitHubRunID,omitempty"`
+	Metrics     resourceMetrics        `json:"Metrics"`
+	TestMetrics map[string]interface{} `json:"TestMetrics"`
 }
 
-type testMetrics struct {
-	DaprConsumedMemory string `json:"DaprConsumedMemory"`
-	DaprConsumedCPU    string `json:"DaprConsumedCPU"`
+type resourceMetrics struct {
+	DaprConsumedCPUm     int64   `json:"DaprConsumedCPUm"`
+	DaprConsumedMemoryMb float64 `json:"DaprConsumedMemoryMb"`
+	AppConsumedCPUm      int64   `json:"AppConsumedCPUm"`
+	AppConsumedMemoryMb  float64 `json:"AppConsumedMemoryMb"`
 }
 
-func NewTestReport(results []TestResult, name, sha, ref, runID, memory, cpu string) *TestReport {
+func NewTestReport(results []TestResult, name string, sidecarUsage, appUsage *runner.AppUsage) *TestReport {
 	return &TestReport{
 		Results:     results,
 		TestName:    name,
-		GitHubSHA:   sha,
-		GitHubREF:   ref,
-		GitHubRunID: runID,
-		Metrics: testMetrics{
-			DaprConsumedCPU:    cpu,
-			DaprConsumedMemory: memory,
+		GitHubSHA:   os.Getenv(githubSHA),
+		GitHubREF:   os.Getenv(githubREF),
+		GitHubRunID: os.Getenv(githubRunID),
+		Metrics: resourceMetrics{
+			DaprConsumedCPUm:     sidecarUsage.CPUm,
+			DaprConsumedMemoryMb: sidecarUsage.MemoryMb,
+			AppConsumedCPUm:      appUsage.CPUm,
+			AppConsumedMemoryMb:  appUsage.MemoryMb,
 		},
+		TestMetrics: map[string]interface{}{},
 	}
+}
+
+func (r *TestReport) SetTotalRestartCount(count int) {
+	r.TestMetrics["TotalRestartCount"] = count
 }

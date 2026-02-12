@@ -1,26 +1,33 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package config
 
 import (
-	"sort"
+	"io"
+	"maps"
+	"reflect"
+	"slices"
 	"testing"
 
-	"github.com/dapr/dapr/pkg/proto/common/v1"
 	"github.com/stretchr/testify/assert"
-)
+	"github.com/stretchr/testify/require"
+	"go.opencensus.io/stats/view"
 
-const (
-	app1    = "app1"
-	app2    = "app2"
-	app3    = "app3"
-	app1Ns1 = "app1||ns1"
-	app2Ns2 = "app2||ns2"
-	app3Ns1 = "app3||ns1"
-	app1Ns4 = "app1||ns4"
+	"github.com/dapr/dapr/pkg/buildinfo"
+	env "github.com/dapr/dapr/pkg/config/env"
+	"github.com/dapr/kit/logger"
+	"github.com/dapr/kit/ptr"
 )
 
 func TestLoadStandaloneConfiguration(t *testing.T) {
@@ -45,55 +52,195 @@ func TestLoadStandaloneConfiguration(t *testing.T) {
 			errorExpected: true,
 		},
 	}
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			config, _, err := LoadStandaloneConfiguration(tc.path)
+			config, err := LoadStandaloneConfiguration(tc.path)
 			if tc.errorExpected {
-				assert.Error(t, err, "Expected an error")
+				require.Error(t, err, "Expected an error")
 				assert.Nil(t, config, "Config should not be loaded")
 			} else {
-				assert.NoError(t, err, "Unexpected error")
+				require.NoError(t, err, "Unexpected error")
 				assert.NotNil(t, config, "Config not loaded as expected")
 			}
 		})
 	}
-}
 
-func TestLoadStandaloneConfigurationKindName(t *testing.T) {
-	t.Run("test Kind and Name", func(t *testing.T) {
-		config, _, err := LoadStandaloneConfiguration("./testdata/config.yaml")
-		assert.NoError(t, err, "Unexpected error")
+	t.Run("parse environment variables", func(t *testing.T) {
+		t.Setenv("DAPR_SECRET", "keepitsecret")
+		config, err := LoadStandaloneConfiguration("./testdata/env_variables_config.yaml")
+		require.NoError(t, err, "Unexpected error")
+		assert.NotNil(t, config, "Config not loaded as expected")
+		assert.Equal(t, "keepitsecret", config.Spec.Secrets.Scopes[0].AllowedSecrets[0])
+	})
+
+	t.Run("check Kind and Name", func(t *testing.T) {
+		config, err := LoadStandaloneConfiguration("./testdata/config.yaml")
+		require.NoError(t, err, "Unexpected error")
 		assert.NotNil(t, config, "Config not loaded as expected")
 		assert.Equal(t, "secretappconfig", config.ObjectMeta.Name)
 		assert.Equal(t, "Configuration", config.TypeMeta.Kind)
 	})
-}
 
-func TestMetricSpecForStandAlone(t *testing.T) {
-	testCases := []struct {
-		name          string
-		confFile      string
-		metricEnabled bool
-	}{
-		{
-			name:          "metric is enabled by default",
-			confFile:      "./testdata/config.yaml",
-			metricEnabled: true,
-		},
-		{
-			name:          "metric is disabled by config",
-			confFile:      "./testdata/metric_disabled.yaml",
-			metricEnabled: false,
-		},
-	}
+	t.Run("metrics spec", func(t *testing.T) {
+		testCases := []struct {
+			name                    string
+			confFile                string
+			metricEnabled           bool
+			recordErrorCodesEnabled bool
+		}{
+			{
+				name:          "metric is enabled by default",
+				confFile:      "./testdata/config.yaml",
+				metricEnabled: true,
+			},
+			{
+				name:                    "recordErrorCodes is enabled by config",
+				confFile:                "./testdata/metric_rec.yaml",
+				metricEnabled:           true,
+				recordErrorCodesEnabled: true,
+			},
+			{
+				name:          "metric is disabled by config",
+				confFile:      "./testdata/metric_disabled.yaml",
+				metricEnabled: false,
+			},
+		}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			config, _, err := LoadStandaloneConfiguration(tc.confFile)
-			assert.NoError(t, err)
-			assert.Equal(t, tc.metricEnabled, config.Spec.MetricSpec.Enabled)
-		})
-	}
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				config, err := LoadStandaloneConfiguration(tc.confFile)
+				require.NoError(t, err)
+				assert.Equal(t, tc.metricEnabled, config.Spec.MetricSpec.GetEnabled())
+				assert.Equal(t, tc.recordErrorCodesEnabled, config.Spec.MetricSpec.GetRecordErrorCodes())
+			})
+		}
+	})
+
+	t.Run("components spec", func(t *testing.T) {
+		testCases := []struct {
+			name           string
+			confFile       string
+			componentsDeny []string
+		}{
+			{
+				name:           "component deny list",
+				confFile:       "./testdata/components_config.yaml",
+				componentsDeny: []string{"foo.bar", "hello.world/v1"},
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				config, err := LoadStandaloneConfiguration(tc.confFile)
+				require.NoError(t, err)
+				assert.True(t, reflect.DeepEqual(tc.componentsDeny, config.Spec.ComponentsSpec.Deny))
+			})
+		}
+	})
+
+	t.Run("features spec", func(t *testing.T) {
+		testCases := []struct {
+			name           string
+			confFile       string
+			featureName    Feature
+			featureEnabled bool
+		}{
+			{
+				name:           "feature is enabled",
+				confFile:       "./testdata/feature_config.yaml",
+				featureName:    Feature("Actor.Reentrancy"),
+				featureEnabled: true,
+			},
+			{
+				name:           "feature is disabled",
+				confFile:       "./testdata/feature_config.yaml",
+				featureName:    Feature("Test.Feature"),
+				featureEnabled: false,
+			},
+			{
+				name:           "feature is disabled if missing",
+				confFile:       "./testdata/feature_config.yaml",
+				featureName:    Feature("Test.Missing"),
+				featureEnabled: false,
+			},
+			{
+				name:           "default feature is disabled",
+				confFile:       "./testdata/default_features_disabled_config.yaml",
+				featureName:    SchedulerReminders,
+				featureEnabled: false,
+			},
+			{
+				name:           "default feature is enabled with config that doesn't have default feature disabled or enabled explicitly",
+				confFile:       "./testdata/feature_config.yaml",
+				featureName:    SchedulerReminders,
+				featureEnabled: true,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				config, err := LoadStandaloneConfiguration(tc.confFile)
+				require.NoError(t, err)
+				config.LoadFeatures()
+				assert.Equal(t, tc.featureEnabled, config.IsFeatureEnabled(tc.featureName))
+			})
+		}
+	})
+
+	t.Run("mTLS spec", func(t *testing.T) {
+		config, err := LoadStandaloneConfiguration("./testdata/mtls_config.yaml")
+		require.NoError(t, err)
+		mtlsSpec := config.GetMTLSSpec()
+		assert.True(t, mtlsSpec.Enabled)
+		assert.Equal(t, "25s", mtlsSpec.WorkloadCertTTL)
+		assert.Equal(t, "1h", mtlsSpec.AllowedClockSkew)
+	})
+
+	t.Run("multiple configurations", func(t *testing.T) {
+		config, err := LoadStandaloneConfiguration("./testdata/feature_config.yaml", "./testdata/mtls_config.yaml")
+		require.NoError(t, err)
+
+		// From feature_config.yaml
+		config.LoadFeatures()
+		assert.True(t, config.IsFeatureEnabled("Actor.Reentrancy"))
+		assert.False(t, config.IsFeatureEnabled("Test.Feature"))
+
+		// From mtls_config.yaml
+		mtlsSpec := config.GetMTLSSpec()
+		assert.True(t, mtlsSpec.Enabled)
+		assert.Equal(t, "25s", mtlsSpec.WorkloadCertTTL)
+		assert.Equal(t, "1h", mtlsSpec.AllowedClockSkew)
+	})
+
+	t.Run("multiple configurations with overriding", func(t *testing.T) {
+		config, err := LoadStandaloneConfiguration("./testdata/feature_config.yaml", "./testdata/mtls_config.yaml", "./testdata/override.yaml")
+		require.NoError(t, err)
+
+		// From feature_config.yaml
+		// Should both be overridden
+		config.LoadFeatures()
+		assert.False(t, config.IsFeatureEnabled("Actor.Reentrancy"))
+		assert.True(t, config.IsFeatureEnabled("Test.Feature"))
+
+		// From mtls_config.yaml
+		mtlsSpec := config.GetMTLSSpec()
+		assert.False(t, mtlsSpec.Enabled) // Overridden
+		assert.Equal(t, "25s", mtlsSpec.WorkloadCertTTL)
+		assert.Equal(t, "1h", mtlsSpec.AllowedClockSkew)
+	})
+
+	t.Run("tracing spec headers value as string", func(t *testing.T) {
+		config, err := LoadStandaloneConfiguration("./testdata/tracing_config.yaml")
+		require.NoError(t, err)
+		assert.Equal(t, "header1=value1,header2=value2", config.Spec.TracingSpec.Otel.Headers)
+		assert.Equal(t, 5000, config.Spec.TracingSpec.Otel.Timeout)
+	})
+
+	t.Run("tracing invalid spec", func(t *testing.T) {
+		_, err := LoadStandaloneConfiguration("./testdata/tracing_invalid_config.yaml")
+		require.Error(t, err)
+	})
 }
 
 func TestSortAndValidateSecretsConfigration(t *testing.T) {
@@ -110,7 +257,7 @@ func TestSortAndValidateSecretsConfigration(t *testing.T) {
 			name: "incorrect default access",
 			config: Configuration{
 				Spec: ConfigurationSpec{
-					Secrets: SecretsSpec{
+					Secrets: &SecretsSpec{
 						Scopes: []SecretsScope{
 							{
 								StoreName:     "testStore",
@@ -126,7 +273,7 @@ func TestSortAndValidateSecretsConfigration(t *testing.T) {
 			name: "empty default access",
 			config: Configuration{
 				Spec: ConfigurationSpec{
-					Secrets: SecretsSpec{
+					Secrets: &SecretsSpec{
 						Scopes: []SecretsScope{
 							{
 								StoreName: "testStore",
@@ -141,7 +288,7 @@ func TestSortAndValidateSecretsConfigration(t *testing.T) {
 			name: "repeated store Name",
 			config: Configuration{
 				Spec: ConfigurationSpec{
-					Secrets: SecretsSpec{
+					Secrets: &SecretsSpec{
 						Scopes: []SecretsScope{
 							{
 								StoreName:     "testStore",
@@ -161,7 +308,7 @@ func TestSortAndValidateSecretsConfigration(t *testing.T) {
 			name: "simple secrets config",
 			config: Configuration{
 				Spec: ConfigurationSpec{
-					Secrets: SecretsSpec{
+					Secrets: &SecretsSpec{
 						Scopes: []SecretsScope{
 							{
 								StoreName:      "testStore",
@@ -178,7 +325,7 @@ func TestSortAndValidateSecretsConfigration(t *testing.T) {
 			name: "case-insensitive default access",
 			config: Configuration{
 				Spec: ConfigurationSpec{
-					Secrets: SecretsSpec{
+					Secrets: &SecretsSpec{
 						Scopes: []SecretsScope{
 							{
 								StoreName:      "testStore",
@@ -194,13 +341,13 @@ func TestSortAndValidateSecretsConfigration(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := sortAndValidateSecretsConfiguration(&tc.config)
+			err := tc.config.sortAndValidateSecretsConfiguration()
 			if tc.errorExpected {
-				assert.Error(t, err, "expected validation to fail")
-			} else {
+				require.Error(t, err, "expected validation to fail")
+			} else if tc.config.Spec.Secrets != nil {
 				for _, scope := range tc.config.Spec.Secrets.Scopes {
-					assert.True(t, sort.StringsAreSorted(scope.AllowedSecrets), "expected sorted slice")
-					assert.True(t, sort.StringsAreSorted(scope.DeniedSecrets), "expected sorted slice")
+					assert.True(t, slices.IsSorted(scope.AllowedSecrets), "expected sorted slice")
+					assert.True(t, slices.IsSorted(scope.DeniedSecrets), "expected sorted slice")
 				}
 			}
 		})
@@ -283,7 +430,7 @@ func TestIsSecretAllowed(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.scope.IsSecretAllowed(tc.secretKey), tc.expectedResult, "incorrect access")
+			assert.Equal(t, tc.expectedResult, tc.scope.IsSecretAllowed(tc.secretKey), "incorrect access")
 		})
 	}
 }
@@ -294,600 +441,324 @@ func TestContainsKey(t *testing.T) {
 	assert.True(t, containsKey(s, "b"), "unexpected result")
 }
 
-func initializeAccessControlList(protocol string) (*AccessControlList, error) {
-	inputSpec := AccessControlSpec{
-		DefaultAction: DenyAccess,
-		TrustDomain:   "abcd",
-		AppPolicies: []AppPolicySpec{
-			{
-				AppName:       app1,
-				DefaultAction: AllowAccess,
-				TrustDomain:   "public",
-				Namespace:     "ns1",
-				AppOperationActions: []AppOperation{
-					{
-						Action:    AllowAccess,
-						HTTPVerb:  []string{"POST", "GET"},
-						Operation: "/op1",
-					},
-					{
-						Action:    DenyAccess,
-						HTTPVerb:  []string{"*"},
-						Operation: "/op2",
-					},
+func TestFeatureEnabled(t *testing.T) {
+	config := Configuration{
+		Spec: ConfigurationSpec{
+			Features: []FeatureSpec{
+				{
+					Name:    "testEnabled",
+					Enabled: true,
 				},
-			},
-			{
-				AppName:       app2,
-				DefaultAction: DenyAccess,
-				TrustDomain:   "domain1",
-				Namespace:     "ns2",
-				AppOperationActions: []AppOperation{
-					{
-						Action:    AllowAccess,
-						HTTPVerb:  []string{"PUT", "GET"},
-						Operation: "/op3/a/*",
-					},
-					{
-						Action:    AllowAccess,
-						HTTPVerb:  []string{"POST"},
-						Operation: "/op4",
-					},
-				},
-			},
-			{
-				AppName:     app3,
-				TrustDomain: "domain1",
-				Namespace:   "ns1",
-				AppOperationActions: []AppOperation{
-					{
-						Action:    AllowAccess,
-						HTTPVerb:  []string{"POST"},
-						Operation: "/op5",
-					},
-				},
-			},
-			{
-				AppName:       app1, // Duplicate app id with a different namespace
-				DefaultAction: AllowAccess,
-				TrustDomain:   "public",
-				Namespace:     "ns4",
-				AppOperationActions: []AppOperation{
-					{
-						Action:    AllowAccess,
-						HTTPVerb:  []string{"*"},
-						Operation: "/op6",
-					},
+				{
+					Name:    "testDisabled",
+					Enabled: false,
 				},
 			},
 		},
 	}
-	accessControlList, err := ParseAccessControlSpec(inputSpec, protocol)
+	config.LoadFeatures()
 
-	return accessControlList, err
+	assert.True(t, config.IsFeatureEnabled("testEnabled"))
+	assert.False(t, config.IsFeatureEnabled("testDisabled"))
+	assert.False(t, config.IsFeatureEnabled("testMissing"))
+
+	// Test config.EnabledFeatures
+	// We sort the values before comparing because order isn't guaranteed (and doesn't matter)
+	actual := config.EnabledFeatures()
+	expect := append([]string{"testEnabled"}, buildinfo.Features()...)
+	slices.Sort(actual)
+	slices.Sort(expect)
+	assert.EqualValues(t, actual, expect)
 }
 
-func TestParseAccessControlSpec(t *testing.T) {
-	t.Run("translate to in-memory rules", func(t *testing.T) {
-		accessControlList, err := initializeAccessControlList(HTTPProtocol)
+func TestSetTracingSpecFromEnv(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otlpendpoint:1234")
+	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "api-key1=value1,api-key2=value2")
 
-		assert.Nil(t, err)
+	// get default configuration
+	conf := LoadDefaultConfiguration()
 
-		assert.Equal(t, DenyAccess, accessControlList.DefaultAction)
-		assert.Equal(t, "abcd", accessControlList.TrustDomain)
+	// set tracing spec from env
+	err := SetTracingSpecFromEnv(conf)
+	require.NoError(t, err)
 
-		// App1
-		assert.Equal(t, app1, accessControlList.PolicySpec[app1Ns1].AppName)
-		assert.Equal(t, AllowAccess, accessControlList.PolicySpec[app1Ns1].DefaultAction)
-		assert.Equal(t, "public", accessControlList.PolicySpec[app1Ns1].TrustDomain)
-		assert.Equal(t, "ns1", accessControlList.PolicySpec[app1Ns1].Namespace)
+	assert.Equal(t, "otlpendpoint:1234", conf.Spec.TracingSpec.Otel.EndpointAddress)
+	assert.Equal(t, "http", conf.Spec.TracingSpec.Otel.Protocol)
+	require.False(t, conf.Spec.TracingSpec.Otel.GetIsSecure())
+	assert.Equal(t, "api-key1=value1,api-key2=value2", conf.Spec.TracingSpec.Otel.Headers)
 
-		op1Actions := AccessControlListOperationAction{
-			OperationPostFix: "/",
-			VerbAction:       make(map[string]string),
-		}
-		op1Actions.VerbAction["POST"] = AllowAccess
-		op1Actions.VerbAction["GET"] = AllowAccess
-		op1Actions.OperationAction = AllowAccess
+	// Spec from config file should not be overridden
+	conf = LoadDefaultConfiguration()
+	conf.Spec.TracingSpec.Otel.EndpointAddress = "configfileendpoint:4321"
+	conf.Spec.TracingSpec.Otel.Protocol = "grpc"
+	conf.Spec.TracingSpec.Otel.IsSecure = ptr.Of(true)
+	conf.Spec.TracingSpec.Otel.Headers = "another-key1=value1,another-key2=value2"
 
-		op2Actions := AccessControlListOperationAction{
-			OperationPostFix: "/",
-			VerbAction:       make(map[string]string),
-		}
-		op2Actions.VerbAction["*"] = DenyAccess
-		op2Actions.OperationAction = DenyAccess
+	// set tracing spec from env
+	err = SetTracingSpecFromEnv(conf)
+	require.NoError(t, err)
 
-		assert.Equal(t, 2, len(accessControlList.PolicySpec[app1Ns1].AppOperationActions["/op1"].VerbAction))
-		assert.Equal(t, op1Actions, accessControlList.PolicySpec[app1Ns1].AppOperationActions["/op1"])
-		assert.Equal(t, 1, len(accessControlList.PolicySpec[app1Ns1].AppOperationActions["/op2"].VerbAction))
-		assert.Equal(t, op2Actions, accessControlList.PolicySpec[app1Ns1].AppOperationActions["/op2"])
+	assert.Equal(t, "configfileendpoint:4321", conf.Spec.TracingSpec.Otel.EndpointAddress)
+	assert.Equal(t, "grpc", conf.Spec.TracingSpec.Otel.Protocol)
+	require.True(t, conf.Spec.TracingSpec.Otel.GetIsSecure())
+	assert.Equal(t, "another-key1=value1,another-key2=value2", conf.Spec.TracingSpec.Otel.Headers)
+}
 
-		// App2
-		assert.Equal(t, app2, accessControlList.PolicySpec[app2Ns2].AppName)
-		assert.Equal(t, DenyAccess, accessControlList.PolicySpec[app2Ns2].DefaultAction)
-		assert.Equal(t, "domain1", accessControlList.PolicySpec[app2Ns2].TrustDomain)
-		assert.Equal(t, "ns2", accessControlList.PolicySpec[app2Ns2].Namespace)
+func TestTracingPrecedenceFromEnv(t *testing.T) {
+	t.Setenv(env.OtlpExporterTracesEndpoint, "tracesendpoint:4321")
+	t.Setenv(env.OtlpExporterEndpoint, "configfileendpoint:4321")
+	t.Setenv(env.OtlpExporterTracesProtocol, "grpc")
+	t.Setenv(env.OtlpExporterProtocol, "http")
+	t.Setenv(env.OtlpExporterTracesHeaders, "traces-key1=value1,traces-key2=value2")
+	t.Setenv(env.OtlpExporterHeaders, "key1=value1,key2=value2")
+	t.Setenv(env.OtlpExporterTracesTimeout, "2000")
+	t.Setenv(env.OtlpExporterTimeout, "1000")
 
-		op3Actions := AccessControlListOperationAction{
-			OperationPostFix: "/a/*",
-			VerbAction:       make(map[string]string),
-		}
-		op3Actions.VerbAction["PUT"] = AllowAccess
-		op3Actions.VerbAction["GET"] = AllowAccess
-		op3Actions.OperationAction = AllowAccess
+	conf := LoadDefaultConfiguration()
+	err := SetTracingSpecFromEnv(conf)
+	require.NoError(t, err)
 
-		op4Actions := AccessControlListOperationAction{
-			OperationPostFix: "/",
-			VerbAction:       make(map[string]string),
-		}
-		op4Actions.VerbAction["POST"] = AllowAccess
-		op4Actions.OperationAction = AllowAccess
+	assert.Equal(t, "tracesendpoint:4321", conf.Spec.TracingSpec.Otel.EndpointAddress)
+	assert.Equal(t, "grpc", conf.Spec.TracingSpec.Otel.Protocol)
+	assert.Equal(t, "traces-key1=value1,traces-key2=value2", conf.Spec.TracingSpec.Otel.Headers)
+	assert.Equal(t, 2000, conf.Spec.TracingSpec.Otel.Timeout)
+}
 
-		assert.Equal(t, 2, len(accessControlList.PolicySpec[app2Ns2].AppOperationActions["/op3"].VerbAction))
-		assert.Equal(t, op3Actions, accessControlList.PolicySpec[app2Ns2].AppOperationActions["/op3"])
-		assert.Equal(t, 1, len(accessControlList.PolicySpec[app2Ns2].AppOperationActions["/op4"].VerbAction))
-		assert.Equal(t, op4Actions, accessControlList.PolicySpec[app2Ns2].AppOperationActions["/op4"])
+func TestTracingTimeoutFromEnv(t *testing.T) {
+	t.Setenv(env.OtlpExporterTracesTimeout, "invalid")
+	conf := LoadDefaultConfiguration()
+	err := SetTracingSpecFromEnv(conf)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid syntax")
+	assert.Equal(t, 0, conf.Spec.TracingSpec.Otel.Timeout)
 
-		// App3
-		assert.Equal(t, app3, accessControlList.PolicySpec[app3Ns1].AppName)
-		assert.Equal(t, "", accessControlList.PolicySpec[app3Ns1].DefaultAction)
-		assert.Equal(t, "domain1", accessControlList.PolicySpec[app3Ns1].TrustDomain)
-		assert.Equal(t, "ns1", accessControlList.PolicySpec[app3Ns1].Namespace)
+	t.Setenv(env.OtlpExporterTracesTimeout, "-1")
+	conf = LoadDefaultConfiguration()
+	err = SetTracingSpecFromEnv(conf)
+	require.NoError(t, err)
+	assert.Equal(t, 0, conf.Spec.TracingSpec.Otel.Timeout)
+}
 
-		op5Actions := AccessControlListOperationAction{
-			OperationPostFix: "/",
-			VerbAction:       make(map[string]string),
-		}
-		op5Actions.VerbAction["POST"] = AllowAccess
-		op5Actions.OperationAction = AllowAccess
+func TestAPIAccessRules(t *testing.T) {
+	config := &Configuration{
+		Spec: ConfigurationSpec{
+			APISpec: &APISpec{
+				Allowed: APIAccessRules{
+					APIAccessRule{Name: "foo", Version: "v1", Protocol: "http"},
+					APIAccessRule{Name: "MyMethod", Version: "v1alpha1", Protocol: "grpc"},
+				},
+				Denied: APIAccessRules{
+					APIAccessRule{Name: "bar", Version: "v1", Protocol: "http"},
+				},
+			},
+		},
+	}
 
-		assert.Equal(t, 1, len(accessControlList.PolicySpec[app3Ns1].AppOperationActions["/op5"].VerbAction))
-		assert.Equal(t, op5Actions, accessControlList.PolicySpec[app3Ns1].AppOperationActions["/op5"])
+	apiSpec := config.Spec.APISpec
 
-		// App1 with a different namespace
-		assert.Equal(t, app1, accessControlList.PolicySpec[app1Ns4].AppName)
-		assert.Equal(t, AllowAccess, accessControlList.PolicySpec[app1Ns4].DefaultAction)
-		assert.Equal(t, "public", accessControlList.PolicySpec[app1Ns4].TrustDomain)
-		assert.Equal(t, "ns4", accessControlList.PolicySpec[app1Ns4].Namespace)
+	assert.Equal(t, []string{"v1/foo"}, slices.Collect(maps.Keys(apiSpec.Allowed.GetRulesByProtocol(APIAccessRuleProtocolHTTP))))
+	assert.Equal(t, []string{"v1alpha1/MyMethod"}, slices.Collect(maps.Keys(apiSpec.Allowed.GetRulesByProtocol(APIAccessRuleProtocolGRPC))))
+	assert.Equal(t, []string{"v1/bar"}, slices.Collect(maps.Keys(apiSpec.Denied.GetRulesByProtocol(APIAccessRuleProtocolHTTP))))
+	assert.Empty(t, slices.Collect(maps.Keys(apiSpec.Denied.GetRulesByProtocol(APIAccessRuleProtocolGRPC))))
+}
 
-		op6Actions := AccessControlListOperationAction{
-			OperationPostFix: "/",
-			VerbAction:       make(map[string]string),
-		}
-		op6Actions.VerbAction["*"] = AllowAccess
-		op6Actions.OperationAction = AllowAccess
-
-		assert.Equal(t, 1, len(accessControlList.PolicySpec[app1Ns4].AppOperationActions["/op6"].VerbAction))
-		assert.Equal(t, op6Actions, accessControlList.PolicySpec[app1Ns4].AppOperationActions["/op6"])
-	})
-
-	t.Run("test when no trust domain and namespace specified in app policy", func(t *testing.T) {
-		invalidAccessControlSpec := AccessControlSpec{
-			DefaultAction: DenyAccess,
-			TrustDomain:   "public",
-			AppPolicies: []AppPolicySpec{
-				{
-					AppName:       app1,
-					DefaultAction: AllowAccess,
-					Namespace:     "ns1",
-					AppOperationActions: []AppOperation{
+func TestSortMetrics(t *testing.T) {
+	t.Run("metrics overrides metric - enabled false", func(t *testing.T) {
+		config := &Configuration{
+			Spec: ConfigurationSpec{
+				MetricSpec: &MetricSpec{
+					Enabled: ptr.Of(true),
+					Rules: []MetricsRule{
 						{
-							Action:    AllowAccess,
-							HTTPVerb:  []string{"POST", "GET"},
-							Operation: "/op1",
-						},
-						{
-							Action:    DenyAccess,
-							HTTPVerb:  []string{"*"},
-							Operation: "/op2",
+							Name: "rule",
 						},
 					},
 				},
-				{
-					AppName:       app2,
-					DefaultAction: DenyAccess,
-					TrustDomain:   "domain1",
-					AppOperationActions: []AppOperation{
-						{
-							Action:    AllowAccess,
-							HTTPVerb:  []string{"PUT", "GET"},
-							Operation: "/op3/a/*",
-						},
-						{
-							Action:    AllowAccess,
-							HTTPVerb:  []string{"POST"},
-							Operation: "/op4",
-						},
-					},
-				},
-				{
-					AppName:       "",
-					DefaultAction: DenyAccess,
-					TrustDomain:   "domain1",
-					AppOperationActions: []AppOperation{
-						{
-							Action:    AllowAccess,
-							HTTPVerb:  []string{"PUT", "GET"},
-							Operation: "/op3/a/*",
-						},
-						{
-							Action:    AllowAccess,
-							HTTPVerb:  []string{"POST"},
-							Operation: "/op4",
-						},
-					},
+				MetricsSpec: &MetricSpec{
+					Enabled: ptr.Of(false),
 				},
 			},
 		}
 
-		_, err := ParseAccessControlSpec(invalidAccessControlSpec, "http")
-		assert.Error(t, err, "invalid access control spec. missing trustdomain for apps: [%s], missing namespace for apps: [%s], missing app name on at least one of the app policies: true", app1, app2)
+		config.sortMetricsSpec()
+		assert.False(t, config.Spec.MetricSpec.GetEnabled())
+		assert.Equal(t, "rule", config.Spec.MetricSpec.Rules[0].Name)
 	})
 
-	t.Run("test when no trust domain is specified for the app", func(t *testing.T) {
-		accessControlSpec := AccessControlSpec{
-			DefaultAction: DenyAccess,
-			TrustDomain:   "",
-			AppPolicies: []AppPolicySpec{
-				{
-					AppName:       app1,
-					DefaultAction: AllowAccess,
-					TrustDomain:   "public",
-					Namespace:     "ns1",
-					AppOperationActions: []AppOperation{
+	t.Run("metrics overrides metric - enabled true", func(t *testing.T) {
+		config := &Configuration{
+			Spec: ConfigurationSpec{
+				MetricSpec: &MetricSpec{
+					Enabled: ptr.Of(false),
+					Rules: []MetricsRule{
 						{
-							Action:    AllowAccess,
-							HTTPVerb:  []string{"POST", "GET"},
-							Operation: "/op1",
-						},
-						{
-							Action:    DenyAccess,
-							HTTPVerb:  []string{"*"},
-							Operation: "/op2",
+							Name: "rule",
 						},
 					},
+				},
+				MetricsSpec: &MetricSpec{
+					Enabled: ptr.Of(true),
 				},
 			},
 		}
 
-		accessControlList, _ := ParseAccessControlSpec(accessControlSpec, "http")
-		assert.Equal(t, "public", accessControlList.PolicySpec[app1Ns1].TrustDomain)
+		config.sortMetricsSpec()
+		assert.True(t, config.Spec.MetricSpec.GetEnabled())
+		assert.Equal(t, "rule", config.Spec.MetricSpec.Rules[0].Name)
 	})
 
-	t.Run("test when no access control policy has been specified", func(t *testing.T) {
-		invalidAccessControlSpec := AccessControlSpec{
-			DefaultAction: "",
-			TrustDomain:   "",
-			AppPolicies:   []AppPolicySpec{},
-		}
-
-		accessControlList, _ := ParseAccessControlSpec(invalidAccessControlSpec, "http")
-		assert.Nil(t, accessControlList)
-	})
-
-	t.Run("test when no default global action has been specified", func(t *testing.T) {
-		invalidAccessControlSpec := AccessControlSpec{
-			TrustDomain: "public",
-			AppPolicies: []AppPolicySpec{
-				{
-					AppName:       app1,
-					DefaultAction: AllowAccess,
-					TrustDomain:   "domain1",
-					Namespace:     "ns1",
-					AppOperationActions: []AppOperation{
+	t.Run("nil metrics enabled doesn't overrides", func(t *testing.T) {
+		config := &Configuration{
+			Spec: ConfigurationSpec{
+				MetricSpec: &MetricSpec{
+					Enabled: ptr.Of(true),
+					Rules: []MetricsRule{
 						{
-							Action:    AllowAccess,
-							HTTPVerb:  []string{"POST", "GET"},
-							Operation: "/op1",
-						},
-						{
-							Action:    DenyAccess,
-							HTTPVerb:  []string{"*"},
-							Operation: "/op2",
+							Name: "rule",
 						},
 					},
 				},
+				MetricsSpec: &MetricSpec{},
 			},
 		}
 
-		accessControlList, _ := ParseAccessControlSpec(invalidAccessControlSpec, "http")
-		assert.Equal(t, accessControlList.DefaultAction, DenyAccess)
+		config.sortMetricsSpec()
+		assert.True(t, config.Spec.MetricSpec.GetEnabled())
+		assert.Equal(t, "rule", config.Spec.MetricSpec.Rules[0].Name)
 	})
 }
 
-func TestSpiffeID(t *testing.T) {
-	t.Run("test parse spiffe id", func(t *testing.T) {
-		spiffeID := "spiffe://mydomain/ns/mynamespace/myappid"
-		id, err := parseSpiffeID(spiffeID)
-		assert.Equal(t, "mydomain", id.TrustDomain)
-		assert.Equal(t, "mynamespace", id.Namespace)
-		assert.Equal(t, "myappid", id.AppID)
-		assert.Nil(t, err)
+func TestMetricsGetHTTPIncreasedCardinality(t *testing.T) {
+	log := logger.NewLogger("test")
+	log.SetOutput(io.Discard)
+
+	t.Run("no http configuration, returns true", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: nil,
+		}
+		assert.True(t, m.GetHTTPIncreasedCardinality(log))
 	})
 
-	t.Run("test parse invalid spiffe id", func(t *testing.T) {
-		spiffeID := "abcd"
-		_, err := parseSpiffeID(spiffeID)
-		assert.NotNil(t, err)
+	t.Run("nil value, returns true", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: &MetricHTTP{
+				IncreasedCardinality: nil,
+			},
+		}
+		assert.True(t, m.GetHTTPIncreasedCardinality(log))
 	})
 
-	t.Run("test parse spiffe id with not all fields", func(t *testing.T) {
-		spiffeID := "spiffe://mydomain/ns/myappid"
-		_, err := parseSpiffeID(spiffeID)
-		assert.NotNil(t, err)
+	t.Run("value is set to true", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: &MetricHTTP{
+				IncreasedCardinality: ptr.Of(true),
+			},
+		}
+		assert.True(t, m.GetHTTPIncreasedCardinality(log))
 	})
 
-	t.Run("test empty spiffe id", func(t *testing.T) {
-		spiffeID := ""
-		_, err := parseSpiffeID(spiffeID)
-		assert.NotNil(t, err)
+	t.Run("value is set to false", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: &MetricHTTP{
+				IncreasedCardinality: ptr.Of(false),
+			},
+		}
+		assert.False(t, m.GetHTTPIncreasedCardinality(log))
 	})
 }
 
-func TestIsOperationAllowedByAccessControlPolicy(t *testing.T) {
-	t.Run("test when no acl specified", func(t *testing.T) {
-		srcAppID := app1
-		spiffeID := SpiffeID{
-			TrustDomain: "public",
-			Namespace:   "ns1",
-			AppID:       srcAppID,
+func TestMetricsGetHTTPLatencyDistributionBuckets(t *testing.T) {
+	log := logger.NewLogger("test")
+	log.SetOutput(io.Discard)
+
+	defaultLatencyDistribution := []float64{1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 20, 25, 30, 40, 50, 65, 80, 100, 130, 160, 200, 250, 300, 400, 500, 650, 800, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000}
+	latencyDistribution := view.Distribution(defaultLatencyDistribution...)
+	t.Run("no http configuration, returns default latency distribution buckets", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: nil,
 		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op1", common.HTTPExtension_POST, HTTPProtocol, nil)
-		// Action = Allow the operation since no ACL is defined
-		assert.True(t, isAllowed)
+		assert.Equal(t, latencyDistribution.Buckets, m.GetLatencyDistribution(log).Buckets)
 	})
 
-	t.Run("test when no matching app in acl found", func(t *testing.T) {
-		srcAppID := "appX"
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "public",
-			Namespace:   "ns1",
-			AppID:       srcAppID,
+	t.Run("nil value, returns latency distribution buckets", func(t *testing.T) {
+		m := MetricSpec{
+			LatencyDistributionBuckets: nil,
 		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op1", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Default global action
-		assert.False(t, isAllowed)
+		assert.Equal(t, latencyDistribution.Buckets, m.GetLatencyDistribution(log).Buckets)
 	})
 
-	t.Run("test when trust domain does not match", func(t *testing.T) {
-		srcAppID := app1
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "private",
-			Namespace:   "ns1",
-			AppID:       srcAppID,
+	customLatencyDistribution := []float64{1, 2, 3}
+	latencyDistribution = view.Distribution(customLatencyDistribution...)
+	t.Run("value is set to list of integers", func(t *testing.T) {
+		m := MetricSpec{
+			LatencyDistributionBuckets: ptr.Of([]int{1, 2, 3}),
 		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op1", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Ignore policy and apply global default action
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when namespace does not match", func(t *testing.T) {
-		srcAppID := app1
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "public",
-			Namespace:   "abcd",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op1", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Ignore policy and apply global default action
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when spiffe id is nil", func(t *testing.T) {
-		srcAppID := app1
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(nil, srcAppID, "op1", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Default global action
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when src app id is empty", func(t *testing.T) {
-		srcAppID := ""
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(nil, srcAppID, "op1", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Default global action
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when operation is not found in the policy spec", func(t *testing.T) {
-		srcAppID := app1
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "public",
-			Namespace:   "ns1",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "opX", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Ignore policy and apply default action for app
-		assert.True(t, isAllowed)
-	})
-
-	t.Run("test http case-sensitivity when matching operation post fix", func(t *testing.T) {
-		srcAppID := app1
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "public",
-			Namespace:   "ns1",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "Op2", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Ignore policy and apply default action for app
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when http verb is not found", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op4", common.HTTPExtension_PUT, HTTPProtocol, accessControlList)
-		// Action = Default action for the specific app
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when default action for app is not specified and no matching http verb found", func(t *testing.T) {
-		srcAppID := app3
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns1",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op5", common.HTTPExtension_PUT, HTTPProtocol, accessControlList)
-		// Action = Global Default action
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when http verb matches *", func(t *testing.T) {
-		srcAppID := app1
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "public",
-			Namespace:   "ns1",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op2", common.HTTPExtension_PUT, HTTPProtocol, accessControlList)
-		// Action = Default action for the specific verb
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when http verb matches a specific verb", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op4", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Default action for the specific verb
-		assert.True(t, isAllowed)
-	})
-
-	t.Run("test when operation is invoked with /", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "/op4", common.HTTPExtension_POST, HTTPProtocol, accessControlList)
-		// Action = Default action for the specific verb
-		assert.True(t, isAllowed)
-	})
-
-	t.Run("test when http verb is not specified", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op4", common.HTTPExtension_NONE, HTTPProtocol, accessControlList)
-		// Action = Default action for the app
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when matching operation post fix is specified in policy spec", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "/op3/a", common.HTTPExtension_PUT, HTTPProtocol, accessControlList)
-		// Action = Default action for the specific verb
-		assert.True(t, isAllowed)
-	})
-
-	t.Run("test grpc case-sensitivity when matching operation post fix", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(GRPCProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "/OP4", common.HTTPExtension_NONE, GRPCProtocol, accessControlList)
-		// Action = Default action for the specific verb
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when non-matching operation post fix is specified in policy spec", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "/op3/b/b", common.HTTPExtension_PUT, HTTPProtocol, accessControlList)
-		// Action = Default action for the app
-		assert.False(t, isAllowed)
-	})
-
-	t.Run("test when non-matching operation post fix is specified in policy spec", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(HTTPProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "/op3/a/b", common.HTTPExtension_PUT, HTTPProtocol, accessControlList)
-		// Action = Default action for the app
-		assert.True(t, isAllowed)
-	})
-
-	t.Run("test with grpc invocation", func(t *testing.T) {
-		srcAppID := app2
-		accessControlList, _ := initializeAccessControlList(GRPCProtocol)
-		spiffeID := SpiffeID{
-			TrustDomain: "domain1",
-			Namespace:   "ns2",
-			AppID:       srcAppID,
-		}
-		isAllowed, _ := IsOperationAllowedByAccessControlPolicy(&spiffeID, srcAppID, "op4", common.HTTPExtension_NONE, GRPCProtocol, accessControlList)
-		// Action = Default action for the app
-		assert.True(t, isAllowed)
+		assert.Equal(t, latencyDistribution.Buckets, m.GetLatencyDistribution(log).Buckets)
 	})
 }
 
-func TestGetOperationPrefixAndPostfix(t *testing.T) {
-	t.Run("test when operation single post fix exists", func(t *testing.T) {
-		operation := "/invoke/*"
-		prefix, postfix := getOperationPrefixAndPostfix(operation)
-		assert.Equal(t, "/invoke", prefix)
-		assert.Equal(t, "/*", postfix)
+func TestMetricsGetHTTPPathMatching(t *testing.T) {
+	t.Run("no http configuration, returns nil", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: nil,
+		}
+		assert.Nil(t, m.GetHTTPPathMatching())
 	})
 
-	t.Run("test when operation longer post fix exists", func(t *testing.T) {
-		operation := "/invoke/a/*"
-		prefix, postfix := getOperationPrefixAndPostfix(operation)
-		assert.Equal(t, "/invoke", prefix)
-		assert.Equal(t, "/a/*", postfix)
+	t.Run("nil value, returns nil", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: &MetricHTTP{
+				PathMatching: nil,
+			},
+		}
+		assert.Nil(t, m.GetHTTPPathMatching())
 	})
 
-	t.Run("test when operation no post fix exists", func(t *testing.T) {
-		operation := "/invoke"
-		prefix, postfix := getOperationPrefixAndPostfix(operation)
-		assert.Equal(t, "/invoke", prefix)
-		assert.Equal(t, "/", postfix)
+	t.Run("config is enabled", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: &MetricHTTP{
+				PathMatching: []string{"/resource/1"},
+			},
+		}
+		config := m.GetHTTPPathMatching()
+		assert.Equal(t, []string{"/resource/1"}, config)
+	})
+}
+
+func TestMetricsGetHTTPExcludeVerbs(t *testing.T) {
+	t.Run("no configuration, returns false", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: nil,
+		}
+		assert.False(t, m.GetHTTPExcludeVerbs())
 	})
 
-	t.Run("test operation multi path post fix exists", func(t *testing.T) {
-		operation := "/invoke/a/b/*"
-		prefix, postfix := getOperationPrefixAndPostfix(operation)
-		assert.Equal(t, "/invoke", prefix)
-		assert.Equal(t, "/a/b/*", postfix)
+	t.Run("nil value, returns false", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: &MetricHTTP{
+				ExcludeVerbs: nil,
+			},
+		}
+		assert.False(t, m.GetHTTPExcludeVerbs())
+	})
+
+	t.Run("config is enabled", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: &MetricHTTP{
+				ExcludeVerbs: ptr.Of(true),
+			},
+		}
+		assert.True(t, m.GetHTTPExcludeVerbs())
+	})
+
+	t.Run("config is disabled", func(t *testing.T) {
+		m := MetricSpec{
+			HTTP: &MetricHTTP{
+				ExcludeVerbs: ptr.Of(false),
+			},
+		}
+		assert.False(t, m.GetHTTPExcludeVerbs())
 	})
 }

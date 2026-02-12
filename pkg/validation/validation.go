@@ -1,16 +1,23 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package validation
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/pkg/errors"
 )
 
 // The consts and vars beginning with dns* were taken from: https://github.com/kubernetes/apimachinery/blob/fc49b38c19f02a58ebc476347e622142f19820b9/pkg/util/validation/validation.go
@@ -22,40 +29,49 @@ const (
 
 var dns1123LabelRegexp = regexp.MustCompile("^" + dns1123LabelFmt + "$")
 
-// ValidateKubernetesAppID returns a bool that indicates whether a dapr app id is valid for the Kubernetes platform.
+// ValidateKubernetesAppID returns an error if the Dapr app id is not valid for the Kubernetes platform.
 func ValidateKubernetesAppID(appID string) error {
 	if appID == "" {
 		return errors.New("value for the dapr.io/app-id annotation is empty")
 	}
-	r := isDNS1123Label(appID)
-	if len(r) == 0 {
-		return nil
+	err := isDNS1123Label(serviceName(appID))
+	if err != nil {
+		return fmt.Errorf("invalid app id (input: '%s', service: '%s'): %w", appID, serviceName(appID), err)
 	}
-	s := fmt.Sprintf("invalid app id(input: %s): %s", appID, strings.Join(r, ","))
-	return errors.New(s)
+	return nil
 }
 
-// The function was taken as-is from: https://github.com/kubernetes/apimachinery/blob/fc49b38c19f02a58ebc476347e622142f19820b9/pkg/util/validation/validation.go
-func isDNS1123Label(value string) []string {
-	var errs []string
+// ValidateSelfHostedAppID returns an error if the Dapr app id is not valid for self-hosted.
+func ValidateSelfHostedAppID(appID string) error {
+	if appID == "" {
+		return errors.New("parameter app-id cannot be empty")
+	}
+	if strings.Contains(appID, ".") {
+		return errors.New("parameter app-id cannot contain dots")
+	}
+	return nil
+}
+
+func serviceName(appID string) string {
+	return appID + "-dapr"
+}
+
+// The function was adapted from: https://github.com/kubernetes/apimachinery/blob/fc49b38c19f02a58ebc476347e622142f19820b9/pkg/util/validation/validation.go
+func isDNS1123Label(value string) error {
+	var errs []error
 	if len(value) > dns1123LabelMaxLength {
-		errs = append(errs, maxLenError(dns1123LabelMaxLength))
+		errs = append(errs, fmt.Errorf("must be no more than %d characters", dns1123LabelMaxLength))
 	}
 	if !dns1123LabelRegexp.MatchString(value) {
 		errs = append(errs, regexError(dns1123LabelErrMsg, dns1123LabelFmt, "my-name", "123-abc"))
 	}
-	return errs
+	return errors.Join(errs...)
 }
 
-// The function was taken as-is from: https://github.com/kubernetes/apimachinery/blob/fc49b38c19f02a58ebc476347e622142f19820b9/pkg/util/validation/validation.go
-func maxLenError(length int) string {
-	return fmt.Sprintf("must be no more than %d characters", length)
-}
-
-// The function was taken as-is from: https://github.com/kubernetes/apimachinery/blob/fc49b38c19f02a58ebc476347e622142f19820b9/pkg/util/validation/validation.go
-func regexError(msg string, fmt string, examples ...string) string {
+// The function was adapted from: https://github.com/kubernetes/apimachinery/blob/fc49b38c19f02a58ebc476347e622142f19820b9/pkg/util/validation/validation.go
+func regexError(msg string, fmt string, examples ...string) error {
 	if len(examples) == 0 {
-		return msg + " (regex used for validation is '" + fmt + "')"
+		return errors.New(msg + " (regex used for validation is '" + fmt + "')")
 	}
 	msg += " (e.g. "
 	for i := range examples {
@@ -65,5 +81,5 @@ func regexError(msg string, fmt string, examples ...string) string {
 		msg += "'" + examples[i] + "', "
 	}
 	msg += "regex used for validation is '" + fmt + "')"
-	return msg
+	return errors.New(msg)
 }
