@@ -1,321 +1,581 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
+//nolint:nosnakecase
 package runtime
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/golang/mock/gomock"
+	"github.com/phayes/freeport"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/zipkin"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clocktesting "k8s.io/utils/clock/testing"
 
-	"contrib.go.opencensus.io/exporter/zipkin"
 	"github.com/dapr/components-contrib/bindings"
-	"github.com/dapr/components-contrib/contenttype"
+	"github.com/dapr/components-contrib/lock"
+	mdata "github.com/dapr/components-contrib/metadata"
+	"github.com/dapr/components-contrib/nameresolution"
 	"github.com/dapr/components-contrib/pubsub"
 	"github.com/dapr/components-contrib/secretstores"
 	"github.com/dapr/components-contrib/state"
-	components_v1alpha1 "github.com/dapr/dapr/pkg/apis/components/v1alpha1"
-	subscriptionsapi "github.com/dapr/dapr/pkg/apis/subscriptions/v1alpha1"
+	commonapi "github.com/dapr/dapr/pkg/apis/common"
+	componentsV1alpha1 "github.com/dapr/dapr/pkg/apis/components/v1alpha1"
+	"github.com/dapr/dapr/pkg/apphealth"
 	channelt "github.com/dapr/dapr/pkg/channel/testing"
-	bindings_loader "github.com/dapr/dapr/pkg/components/bindings"
-	pubsub_loader "github.com/dapr/dapr/pkg/components/pubsub"
-	secretstores_loader "github.com/dapr/dapr/pkg/components/secretstores"
-	state_loader "github.com/dapr/dapr/pkg/components/state"
+	bindingsLoader "github.com/dapr/dapr/pkg/components/bindings"
+	configurationLoader "github.com/dapr/dapr/pkg/components/configuration"
+	lockLoader "github.com/dapr/dapr/pkg/components/lock"
+	httpMiddlewareLoader "github.com/dapr/dapr/pkg/components/middleware/http"
+	nrLoader "github.com/dapr/dapr/pkg/components/nameresolution"
+	pubsubLoader "github.com/dapr/dapr/pkg/components/pubsub"
+	secretstoresLoader "github.com/dapr/dapr/pkg/components/secretstores"
+	"github.com/dapr/dapr/pkg/config/protocol"
+	"github.com/dapr/dapr/pkg/healthz"
+	"github.com/dapr/dapr/pkg/metrics"
+	wfenginefake "github.com/dapr/dapr/pkg/runtime/wfengine/fake"
+	"github.com/dapr/dapr/pkg/security"
+
+	actorsfake "github.com/dapr/dapr/pkg/actors/fake"
+	pb "github.com/dapr/dapr/pkg/api/grpc/proxy/testservice"
+	stateLoader "github.com/dapr/dapr/pkg/components/state"
 	"github.com/dapr/dapr/pkg/config"
+	modeconfig "github.com/dapr/dapr/pkg/config/modes"
 	"github.com/dapr/dapr/pkg/cors"
-	diag_utils "github.com/dapr/dapr/pkg/diagnostics/utils"
+	diagUtils "github.com/dapr/dapr/pkg/diagnostics/utils"
 	invokev1 "github.com/dapr/dapr/pkg/messaging/v1"
 	"github.com/dapr/dapr/pkg/modes"
-	runtimev1pb "github.com/dapr/dapr/pkg/proto/runtime/v1"
-	runtime_pubsub "github.com/dapr/dapr/pkg/runtime/pubsub"
-	"github.com/dapr/dapr/pkg/runtime/security"
-	"github.com/dapr/dapr/pkg/scopes"
-	"github.com/dapr/dapr/pkg/sentry/certs"
+	"github.com/dapr/dapr/pkg/resiliency"
+	"github.com/dapr/dapr/pkg/runtime/authorizer"
+	rterrors "github.com/dapr/dapr/pkg/runtime/errors"
+	rtmock "github.com/dapr/dapr/pkg/runtime/mock"
+	"github.com/dapr/dapr/pkg/runtime/processor"
+	runtimePubsub "github.com/dapr/dapr/pkg/runtime/pubsub"
+	"github.com/dapr/dapr/pkg/runtime/registry"
 	daprt "github.com/dapr/dapr/pkg/testing"
-	"github.com/ghodss/yaml"
-	jsoniter "github.com/json-iterator/go"
-	"github.com/phayes/freeport"
-	"github.com/pkg/errors"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
-	"go.opencensus.io/trace"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/dapr/kit/crypto/spiffe"
+	"github.com/dapr/kit/logger"
+	"github.com/dapr/kit/ptr"
 )
 
 const (
-	TestRuntimeConfigID  = "consumer0"
 	TestPubsubName       = "testpubsub"
 	TestSecondPubsubName = "testpubsub2"
+	TestLockName         = "testlock"
+	resourcesDir         = "./components"
 	maxGRPCServerUptime  = 200 * time.Millisecond
 )
 
-var (
-	testCertRoot = `-----BEGIN CERTIFICATE-----
-MIIBjjCCATOgAwIBAgIQdZeGNuAHZhXSmb37Pnx2QzAKBggqhkjOPQQDAjAYMRYw
-FAYDVQQDEw1jbHVzdGVyLmxvY2FsMB4XDTIwMDIwMTAwMzUzNFoXDTMwMDEyOTAw
-MzUzNFowGDEWMBQGA1UEAxMNY2x1c3Rlci5sb2NhbDBZMBMGByqGSM49AgEGCCqG
-SM49AwEHA0IABAeMFRst4JhcFpebfgEs1MvJdD7h5QkCbLwChRHVEUoaDqd1aYjm
-bX5SuNBXz5TBEhHfTV3Objh6LQ2N+CBoCeOjXzBdMA4GA1UdDwEB/wQEAwIBBjAS
-BgNVHRMBAf8ECDAGAQH/AgEBMB0GA1UdDgQWBBRBWthv5ZQ3vALl2zXWwAXSmZ+m
-qTAYBgNVHREEETAPgg1jbHVzdGVyLmxvY2FsMAoGCCqGSM49BAMCA0kAMEYCIQDN
-rQNOck4ENOhmLROE/wqH0MKGjE6P8yzesgnp9fQI3AIhAJaVPrZloxl1dWCgmNWo
-Iklq0JnMgJU7nS+VpVvlgBN8
------END CERTIFICATE-----`
-
-	testInputBindingData = []byte("fakedata")
-)
-
-type MockKubernetesStateStore struct {
-	callback func()
-}
-
-func (m *MockKubernetesStateStore) Init(metadata secretstores.Metadata) error {
-	if m.callback != nil {
-		m.callback()
-	}
-	return nil
-}
-
-func (m *MockKubernetesStateStore) GetSecret(req secretstores.GetSecretRequest) (secretstores.GetSecretResponse, error) {
-	return secretstores.GetSecretResponse{
-		Data: map[string]string{
-			"key1":   "value1",
-			"_value": "_value_data",
-			"name1":  "value1",
-		},
-	}, nil
-}
-
-func (m *MockKubernetesStateStore) BulkGetSecret(req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
-	response := map[string]map[string]string{}
-	response["k8s-secret"] = map[string]string{
-		"key1":   "value1",
-		"_value": "_value_data",
-		"name1":  "value1",
-	}
-	return secretstores.BulkGetSecretResponse{
-		Data: response,
-	}, nil
-}
-
-func NewMockKubernetesStore() secretstores.SecretStore {
-	return &MockKubernetesStateStore{}
-}
-
-func NewMockKubernetesStoreWithInitCallback(cb func()) secretstores.SecretStore {
-	return &MockKubernetesStateStore{callback: cb}
-}
-
 func TestNewRuntime(t *testing.T) {
 	// act
-	r := NewDaprRuntime(&Config{}, &config.Configuration{}, &config.AccessControlList{})
+	r, err := newDaprRuntime(t.Context(), nil, &internalConfig{
+		mode: modes.StandaloneMode,
+		metricsExporter: metrics.New(metrics.Options{
+			Log:       log,
+			Namespace: metrics.DefaultMetricNamespace,
+			Healthz:   healthz.New(),
+		}),
+		registry:         registry.New(registry.NewOptions()),
+		healthz:          healthz.New(),
+		schedulerStreams: 3,
+	}, &config.Configuration{}, &config.AccessControlList{}, resiliency.New(logger.NewLogger("test")))
 
 	// assert
+	require.NoError(t, err)
 	assert.NotNil(t, r, "runtime must be initiated")
 }
 
-// helper to populate subscription array for 2 pubsubs.
-// 'topics' are the topics for the first pubsub.
-// 'topics2' are the topics for the second pubsub.
-func getSubscriptionsJSONString(topics []string, topics2 []string) string {
-	s := []runtime_pubsub.Subscription{}
-	for _, t := range topics {
-		s = append(s, runtime_pubsub.Subscription{
-			PubsubName: TestPubsubName,
-			Topic:      t,
-			Route:      t,
-		})
-	}
-
-	for _, t := range topics2 {
-		s = append(s, runtime_pubsub.Subscription{
-			PubsubName: TestSecondPubsubName,
-			Topic:      t,
-			Route:      t,
-		})
-	}
-	b, _ := json.Marshal(&s)
-
-	return string(b)
-}
-
-func getSubscriptionCustom(topic, route string) string {
-	s := []runtime_pubsub.Subscription{
-		{
-			PubsubName: TestPubsubName,
-			Topic:      topic,
-			Route:      route,
-		},
-	}
-	b, _ := json.Marshal(&s)
-	return string(b)
-}
-
-func testDeclarativeSubscription() subscriptionsapi.Subscription {
-	return subscriptionsapi.Subscription{
-		TypeMeta: meta_v1.TypeMeta{
-			Kind: "Subscription",
-		},
-		Spec: subscriptionsapi.SubscriptionSpec{
-			Topic:      "topic1",
-			Route:      "myroute",
-			Pubsubname: "pubsub",
-		},
-	}
-}
-
-func writeSubscriptionToDisk(subscription subscriptionsapi.Subscription, filePath string) {
-	b, _ := yaml.Marshal(subscription)
-	ioutil.WriteFile(filePath, b, 0600)
-}
-
-func TestProcessComponentsAndDependents(t *testing.T) {
-	rt := NewTestDaprRuntime(modes.StandaloneMode)
-
-	incorrectComponentType := components_v1alpha1.Component{
-
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name: TestPubsubName,
-		},
-		Spec: components_v1alpha1.ComponentSpec{
-			Type:     "pubsubs.mockPubSub",
-			Version:  "v1",
-			Metadata: getFakeMetadataItems(),
-		},
-	}
-
-	t.Run("test incorrect type", func(t *testing.T) {
-		err := rt.processComponentAndDependents(incorrectComponentType)
-		assert.Error(t, err, "expected an error")
-		assert.Equal(t, "incorrect type pubsubs.mockPubSub", err.Error(), "expected error strings to match")
-	})
-}
-
 func TestDoProcessComponent(t *testing.T) {
-	rt := NewTestDaprRuntime(modes.StandaloneMode)
+	rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+	require.NoError(t, err)
+	defer stopRuntime(t, rt)
 
-	pubsubComponent := components_v1alpha1.Component{
-
-		ObjectMeta: meta_v1.ObjectMeta{
+	pubsubComponent := componentsV1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: TestPubsubName,
 		},
-		Spec: components_v1alpha1.ComponentSpec{
+		Spec: componentsV1alpha1.ComponentSpec{
 			Type:     "pubsub.mockPubSub",
 			Version:  "v1",
-			Metadata: getFakeMetadataItems(),
+			Metadata: daprt.GetFakeMetadataItems(),
 		},
 	}
+
+	lockComponent := componentsV1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: TestLockName,
+		},
+		Spec: componentsV1alpha1.ComponentSpec{
+			Type:    "lock.mockLock",
+			Version: "v1",
+		},
+	}
+
+	t.Run("test error on lock init", func(t *testing.T) {
+		// setup
+		ctrl := gomock.NewController(t)
+		mockLockStore := daprt.NewMockStore(ctrl)
+		mockLockStore.EXPECT().InitLockStore(t.Context(), gomock.Any()).Return(assert.AnError)
+
+		rt.runtimeConfig.registry.Locks().RegisterComponent(
+			func(_ logger.Logger) lock.Store {
+				return mockLockStore
+			},
+			"mockLock",
+		)
+
+		// act
+		err := rt.processor.Init(t.Context(), lockComponent)
+
+		// assert
+		require.Error(t, err, "expected an error")
+		assert.Equal(t, err.Error(), rterrors.NewInit(rterrors.InitComponentFailure, "testlock (lock.mockLock/v1)", assert.AnError).Error(), "expected error strings to match")
+	})
+
+	t.Run("test error when lock version invalid", func(t *testing.T) {
+		// setup
+		ctrl := gomock.NewController(t)
+		mockLockStore := daprt.NewMockStore(ctrl)
+
+		rt.runtimeConfig.registry.Locks().RegisterComponent(
+			func(_ logger.Logger) lock.Store {
+				return mockLockStore
+			},
+			"mockLock",
+		)
+
+		lockComponentV3 := lockComponent
+		lockComponentV3.Spec.Version = "v3"
+
+		// act
+		err := rt.processor.Init(t.Context(), lockComponentV3)
+
+		// assert
+		require.Error(t, err, "expected an error")
+		assert.Equal(t, err.Error(), rterrors.NewInit(rterrors.CreateComponentFailure, "testlock (lock.mockLock/v3)", errors.New("couldn't find lock store lock.mockLock/v3")).Error())
+	})
+
+	t.Run("test error when lock prefix strategy invalid", func(t *testing.T) {
+		// setup
+		ctrl := gomock.NewController(t)
+		mockLockStore := daprt.NewMockStore(ctrl)
+		mockLockStore.EXPECT().InitLockStore(t.Context(), gomock.Any()).Return(nil)
+
+		rt.runtimeConfig.registry.Locks().RegisterComponent(
+			func(_ logger.Logger) lock.Store {
+				return mockLockStore
+			},
+			"mockLock",
+		)
+
+		lockComponentWithWrongStrategy := lockComponent
+		lockComponentWithWrongStrategy.Spec.Metadata = []commonapi.NameValuePair{
+			{
+				Name: "keyPrefix",
+				Value: commonapi.DynamicValue{
+					JSON: v1.JSON{Raw: []byte("||")},
+				},
+			},
+		}
+		// act
+		err := rt.processor.Init(t.Context(), lockComponentWithWrongStrategy)
+		// assert
+		require.Error(t, err)
+	})
+
+	t.Run("lock init successfully and set right strategy", func(t *testing.T) {
+		// setup
+		ctrl := gomock.NewController(t)
+		mockLockStore := daprt.NewMockStore(ctrl)
+		mockLockStore.EXPECT().InitLockStore(t.Context(), gomock.Any()).Return(nil)
+
+		rt.runtimeConfig.registry.Locks().RegisterComponent(
+			func(_ logger.Logger) lock.Store {
+				return mockLockStore
+			},
+			"mockLock",
+		)
+
+		// act
+		err := rt.processor.Init(t.Context(), lockComponent)
+		// assert
+		require.NoError(t, err, "unexpected error")
+		// get modified key
+		key, err := lockLoader.GetModifiedLockKey("test", "mockLock", "appid-1")
+		require.NoError(t, err, "unexpected error")
+		assert.Equal(t, "lock||appid-1||test", key)
+	})
 
 	t.Run("test error on pubsub init", func(t *testing.T) {
 		// setup
 		mockPubSub := new(daprt.MockPubSub)
 
-		rt.pubSubRegistry.Register(
-			pubsub_loader.New("mockPubSub", func() pubsub.PubSub {
+		rt.runtimeConfig.registry.PubSubs().RegisterComponent(
+			func(_ logger.Logger) pubsub.PubSub {
 				return mockPubSub
-			}),
+			},
+			"mockPubSub",
 		)
 		expectedMetadata := pubsub.Metadata{
-			Properties: getFakeProperties(),
+			Base: mdata.Base{
+				Name:       TestPubsubName,
+				Properties: daprt.GetFakeProperties(),
+			},
 		}
 
 		mockPubSub.On("Init", expectedMetadata).Return(assert.AnError)
 
 		// act
-		err := rt.doProcessOneComponent(ComponentCategory("pubsub"), pubsubComponent)
+		err := rt.processor.Init(t.Context(), pubsubComponent)
 
 		// assert
-		assert.Error(t, err, "expected an error")
-		assert.Equal(t, assert.AnError.Error(), err.Error(), "expected error strings to match")
+		require.Error(t, err, "expected an error")
+		assert.Equal(t, err.Error(), rterrors.NewInit(rterrors.InitComponentFailure, "testpubsub (pubsub.mockPubSub/v1)", assert.AnError).Error(), "expected error strings to match")
 	})
 
 	t.Run("test invalid category component", func(t *testing.T) {
 		// act
-		err := rt.doProcessOneComponent(ComponentCategory("invalid"), pubsubComponent)
-
+		err := rt.processor.Init(t.Context(), componentsV1alpha1.Component{
+			Spec: componentsV1alpha1.ComponentSpec{
+				Type: "invalid",
+			},
+		})
 		// assert
-		assert.NoError(t, err, "no error expected")
+		require.Error(t, err, "error expected")
 	})
 }
 
-func TestInitState(t *testing.T) {
-	rt := NewTestDaprRuntime(modes.StandaloneMode)
+// Test that flushOutstandingComponents waits for components.
+func TestFlushOutstandingComponent(t *testing.T) {
+	t.Run("We can call flushOustandingComponents more than once", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+		defer stopRuntime(t, rt)
+		wasCalled := false
+		m := rtmock.NewMockKubernetesStoreWithInitCallback(func(context.Context) error {
+			time.Sleep(100 * time.Millisecond)
+			wasCalled = true
+			return nil
+		})
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			"kubernetesMock",
+		)
 
-	mockStateComponent := components_v1alpha1.Component{
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name: TestPubsubName,
-		},
-		Spec: components_v1alpha1.ComponentSpec{
-			Type:    "state.mockState",
-			Version: "v1",
-			Metadata: []components_v1alpha1.MetadataItem{
-				{
-					Name: "actorStateStore",
-					Value: components_v1alpha1.DynamicValue{
-						JSON: v1.JSON{Raw: []byte("true")},
+		go rt.processor.Process(t.Context())
+		rt.processor.AddPendingComponent(t.Context(), componentsV1alpha1.Component{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "kubernetesMock",
+			},
+			Spec: componentsV1alpha1.ComponentSpec{
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
+			},
+		})
+		rt.flushOutstandingComponents(t.Context())
+		assert.True(t, wasCalled)
+
+		// Make sure that the goroutine was restarted and can flush a second time
+		wasCalled = false
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			"kubernetesMock2",
+		)
+
+		rt.processor.AddPendingComponent(t.Context(), componentsV1alpha1.Component{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "kubernetesMock2",
+			},
+			Spec: componentsV1alpha1.ComponentSpec{
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
+			},
+		})
+		rt.flushOutstandingComponents(t.Context())
+		assert.True(t, wasCalled)
+	})
+	t.Run("flushOutstandingComponents blocks for components with outstanding dependanices", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+		defer stopRuntime(t, rt)
+		wasCalled := false
+		wasCalledChild := false
+		wasCalledGrandChild := false
+		m := rtmock.NewMockKubernetesStoreWithInitCallback(func(context.Context) error {
+			time.Sleep(100 * time.Millisecond)
+			wasCalled = true
+			return nil
+		})
+		mc := rtmock.NewMockKubernetesStoreWithInitCallback(func(context.Context) error {
+			time.Sleep(100 * time.Millisecond)
+			wasCalledChild = true
+			return nil
+		})
+		mgc := rtmock.NewMockKubernetesStoreWithInitCallback(func(context.Context) error {
+			time.Sleep(100 * time.Millisecond)
+			wasCalledGrandChild = true
+			return nil
+		})
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			"kubernetesMock",
+		)
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return mc
+			},
+			"kubernetesMockChild",
+		)
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return mgc
+			},
+			"kubernetesMockGrandChild",
+		)
+
+		go rt.processor.Process(t.Context())
+		rt.processor.AddPendingComponent(t.Context(), componentsV1alpha1.Component{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "kubernetesMockGrandChild",
+			},
+			Spec: componentsV1alpha1.ComponentSpec{
+				Type:    "secretstores.kubernetesMockGrandChild",
+				Version: "v1",
+				Metadata: []commonapi.NameValuePair{
+					{
+						Name: "a",
+						SecretKeyRef: commonapi.SecretKeyRef{
+							Key:  "key1",
+							Name: "name1",
+						},
 					},
 				},
 			},
-		},
-	}
+			Auth: componentsV1alpha1.Auth{
+				SecretStore: "kubernetesMockChild",
+			},
+		})
+		rt.processor.AddPendingComponent(t.Context(), componentsV1alpha1.Component{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "kubernetesMockChild",
+			},
+			Spec: componentsV1alpha1.ComponentSpec{
+				Type:    "secretstores.kubernetesMockChild",
+				Version: "v1",
+				Metadata: []commonapi.NameValuePair{
+					{
+						Name: "a",
+						SecretKeyRef: commonapi.SecretKeyRef{
+							Key:  "key1",
+							Name: "name1",
+						},
+					},
+				},
+			},
+			Auth: componentsV1alpha1.Auth{
+				SecretStore: "kubernetesMock",
+			},
+		})
+		rt.processor.AddPendingComponent(t.Context(), componentsV1alpha1.Component{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "kubernetesMock",
+			},
+			Spec: componentsV1alpha1.ComponentSpec{
+				Type:    "secretstores.kubernetesMock",
+				Version: "v1",
+			},
+		})
+		rt.flushOutstandingComponents(t.Context())
+		assert.True(t, wasCalled)
+		assert.True(t, wasCalledChild)
+		assert.True(t, wasCalledGrandChild)
+	})
+}
 
-	initMockStateStoreForRuntime := func(rt *DaprRuntime, e error) *daprt.MockStateStore {
-		mockStateStore := new(daprt.MockStateStore)
+func TestInitNameResolution(t *testing.T) {
+	initMockResolverForRuntime := func(rt *DaprRuntime, resolverName string, e error) *daprt.MockResolver {
+		mockResolver := new(daprt.MockResolver)
 
-		rt.stateStoreRegistry.Register(
-			state_loader.New("mockState", func() state.Store {
-				return mockStateStore
-			}),
+		rt.runtimeConfig.registry.NameResolutions().RegisterComponent(
+			func(_ logger.Logger) nameresolution.Resolver {
+				return mockResolver
+			},
+			resolverName,
 		)
 
-		expectedMetadata := state.Metadata{
-			Properties: map[string]string{
-				actorStateStore: "true",
+		expectedMetadata := nameresolution.Metadata{
+			Base: mdata.Base{
+				Name: resolverName,
+			},
+			Instance: nameresolution.Instance{
+				DaprHTTPPort:     rt.runtimeConfig.httpPort,
+				DaprInternalPort: rt.runtimeConfig.internalGRPCPort,
+				AppPort:          rt.runtimeConfig.appConnectionConfig.Port,
+				Address:          rt.hostAddress,
+				AppID:            rt.runtimeConfig.id,
+				Namespace:        "default",
 			},
 		}
 
-		mockStateStore.On("Init", expectedMetadata).Return(e)
+		mockResolver.On("Init", expectedMetadata).Return(e)
 
-		return mockStateStore
+		return mockResolver
 	}
 
-	t.Run("test init state store", func(t *testing.T) {
-		// setup
-		initMockStateStoreForRuntime(rt, nil)
+	t.Run("error on unknown resolver", func(t *testing.T) {
+		// given
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		// target resolver
+		rt.globalConfig.Spec.NameResolutionSpec = &config.NameResolutionSpec{
+			Component: "targetResolver",
+		}
+
+		// registered resolver
+		initMockResolverForRuntime(rt, "anotherResolver", nil)
 
 		// act
-		err := rt.initState(mockStateComponent)
+		err = rt.initNameResolution(t.Context())
 
 		// assert
-		assert.NoError(t, err, "expected no error")
+		require.Error(t, err)
 	})
 
-	t.Run("test init state store error", func(t *testing.T) {
-		// setup
-		initMockStateStoreForRuntime(rt, assert.AnError)
+	t.Run("test init nameresolution", func(t *testing.T) {
+		// given
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		// target resolver
+		rt.globalConfig.Spec.NameResolutionSpec = &config.NameResolutionSpec{
+			Component: "someResolver",
+		}
+
+		// registered resolver
+		initMockResolverForRuntime(rt, "someResolver", nil)
 
 		// act
-		err := rt.initState(mockStateComponent)
+		err = rt.initNameResolution(t.Context())
 
 		// assert
-		assert.Error(t, err, "expected error")
-		assert.Equal(t, assert.AnError.Error(), err.Error(), "expected error strings to match")
+		require.NoError(t, err, "expected no error")
+	})
+
+	t.Run("test init nameresolution default in StandaloneMode", func(t *testing.T) {
+		// given
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		// target resolver
+		rt.globalConfig.Spec.NameResolutionSpec = &config.NameResolutionSpec{}
+
+		// registered resolver
+		initMockResolverForRuntime(rt, "mdns", nil)
+
+		// act
+		err = rt.initNameResolution(t.Context())
+
+		// assert
+		require.NoError(t, err, "expected no error")
+	})
+
+	t.Run("test init nameresolution nil in StandaloneMode", func(t *testing.T) {
+		// given
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		// target resolver
+		rt.globalConfig.Spec.NameResolutionSpec = nil
+
+		// registered resolver
+		initMockResolverForRuntime(rt, "mdns", nil)
+
+		// act
+		err = rt.initNameResolution(t.Context())
+
+		// assert
+		require.NoError(t, err, "expected no error")
+	})
+
+	t.Run("test init nameresolution default in KubernetesMode", func(t *testing.T) {
+		// given
+		rt, err := NewTestDaprRuntime(t, modes.KubernetesMode)
+		require.NoError(t, err)
+
+		// target resolver
+		rt.globalConfig.Spec.NameResolutionSpec = &config.NameResolutionSpec{}
+
+		// registered resolver
+		initMockResolverForRuntime(rt, "kubernetes", nil)
+
+		// act
+		err = rt.initNameResolution(t.Context())
+
+		// assert
+		require.NoError(t, err, "expected no error")
+	})
+
+	t.Run("test init nameresolution nil in KubernetesMode", func(t *testing.T) {
+		// given
+		rt, err := NewTestDaprRuntime(t, modes.KubernetesMode)
+		require.NoError(t, err)
+
+		// target resolver
+		rt.globalConfig.Spec.NameResolutionSpec = nil
+
+		// registered resolver
+		initMockResolverForRuntime(rt, "kubernetes", nil)
+
+		// act
+		err = rt.initNameResolution(t.Context())
+
+		// assert
+		require.NoError(t, err, "expected no error")
 	})
 }
 
@@ -324,822 +584,134 @@ func TestSetupTracing(t *testing.T) {
 		name              string
 		tracingConfig     config.TracingSpec
 		hostAddress       string
-		expectedExporters []trace.Exporter
+		expectedExporters []sdktrace.SpanExporter
 		expectedErr       string
 	}{{
 		name:          "no trace exporter",
 		tracingConfig: config.TracingSpec{},
 	}, {
-		name:        "bad host address, failing zipkin",
-		hostAddress: "bad:host:address",
+		name: "sampling rate 1 without trace exporter",
 		tracingConfig: config.TracingSpec{
-			Zipkin: config.ZipkinSpec{
-				EndpointAddress: "http://foo.bar",
+			SamplingRate: "1",
+		},
+		expectedExporters: []sdktrace.SpanExporter{&diagUtils.NullExporter{}},
+	}, {
+		name: "bad host address, failing zipkin",
+		tracingConfig: config.TracingSpec{
+			Zipkin: &config.ZipkinSpec{
+				EndpointAddress: "localhost",
 			},
 		},
-		expectedErr: "too many colons",
+		expectedErr: "invalid collector URL \"localhost\": no scheme or host",
 	}, {
 		name: "zipkin trace exporter",
 		tracingConfig: config.TracingSpec{
-			Zipkin: config.ZipkinSpec{
+			Zipkin: &config.ZipkinSpec{
 				EndpointAddress: "http://foo.bar",
 			},
 		},
-		expectedExporters: []trace.Exporter{&zipkin.Exporter{}},
+		expectedExporters: []sdktrace.SpanExporter{&zipkin.Exporter{}},
+	}, {
+		name: "otel trace http exporter",
+		tracingConfig: config.TracingSpec{
+			Otel: &config.OtelSpec{
+				EndpointAddress: "foo.bar",
+				IsSecure:        ptr.Of(false),
+				Protocol:        "http",
+				Headers:         "header1=value1,header2=value2",
+			},
+		},
+		expectedExporters: []sdktrace.SpanExporter{&otlptrace.Exporter{}},
+	}, {
+		name: "invalid otel trace exporter protocol",
+		tracingConfig: config.TracingSpec{
+			Otel: &config.OtelSpec{
+				EndpointAddress: "foo.bar",
+				IsSecure:        ptr.Of(false),
+				Protocol:        "tcp",
+			},
+		},
+		expectedErr: "invalid protocol tcp provided for Otel endpoint",
+	}, {
+		name: "invalid otel trace exporter headers",
+		tracingConfig: config.TracingSpec{
+			Otel: &config.OtelSpec{
+				EndpointAddress: "foo.bar",
+				IsSecure:        ptr.Of(false),
+				Protocol:        "http",
+				Headers:         "invalidheaders",
+			},
+		},
+		expectedErr: "invalid headers provided for Otel endpoint",
 	}, {
 		name: "stdout trace exporter",
 		tracingConfig: config.TracingSpec{
 			Stdout: true,
 		},
-		expectedExporters: []trace.Exporter{&diag_utils.StdoutExporter{}},
+		expectedExporters: []sdktrace.SpanExporter{&diagUtils.StdoutExporter{}},
 	}, {
 		name: "all trace exporters",
 		tracingConfig: config.TracingSpec{
-			Zipkin: config.ZipkinSpec{
+			Otel: &config.OtelSpec{
+				EndpointAddress: "http://foo.bar",
+				IsSecure:        ptr.Of(false),
+				Protocol:        "http",
+			},
+			Zipkin: &config.ZipkinSpec{
 				EndpointAddress: "http://foo.bar",
 			},
 			Stdout: true,
 		},
-		expectedExporters: []trace.Exporter{&diag_utils.StdoutExporter{}, &zipkin.Exporter{}},
+		expectedExporters: []sdktrace.SpanExporter{&diagUtils.StdoutExporter{}, &zipkin.Exporter{}, &otlptrace.Exporter{}},
 	}}
 
-	for _, tc := range testcases {
+	for i, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			rt := NewTestDaprRuntime(modes.StandaloneMode)
-			rt.globalConfig.Spec.TracingSpec = tc.tracingConfig
+			rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+			require.NoError(t, err)
+			defer stopRuntime(t, rt)
+			rt.globalConfig.Spec.TracingSpec = &testcases[i].tracingConfig
 			if tc.hostAddress != "" {
 				rt.hostAddress = tc.hostAddress
 			}
-			// Setup tracing with the fake trace exporter store to confirm
+			// Setup tracing with the fake tracer provider  store to confirm
 			// the right exporter was registered.
-			exporterStore := &fakeTraceExporterStore{}
-			if err := rt.setupTracing(rt.hostAddress, exporterStore); tc.expectedErr != "" {
+			tpStore := newFakeTracerProviderStore()
+			if err := rt.setupTracing(t.Context(), rt.hostAddress, tpStore); tc.expectedErr != "" {
 				assert.Contains(t, err.Error(), tc.expectedErr)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
-			for i, exporter := range exporterStore.exporters {
+			if len(tc.expectedExporters) > 0 {
+				assert.True(t, tpStore.HasExporter())
+			}
+			for i, exporter := range tpStore.exporters {
 				// Exporter types don't expose internals, so we can only validate that
 				// the right type of  exporter was registered.
 				assert.Equal(t, reflect.TypeOf(tc.expectedExporters[i]), reflect.TypeOf(exporter))
 			}
-			// Setup tracing with the OpenCensus global exporter store.
+			// Setup tracing with the OpenTelemetry trace provider store.
 			// We have no way to validate the result, but we can at least
 			// confirm that nothing blows up.
-			rt.setupTracing(rt.hostAddress, openCensusExporterStore{})
+			if tc.expectedErr == "" {
+				rt.setupTracing(t.Context(), rt.hostAddress, newOpentelemetryTracerProviderStore())
+			}
 		})
 	}
-}
-
-func TestMetadataUUID(t *testing.T) {
-	pubsubComponent := components_v1alpha1.Component{
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name: TestPubsubName,
-		},
-		Spec: components_v1alpha1.ComponentSpec{
-			Type:     "pubsub.mockPubSub",
-			Version:  "v1",
-			Metadata: getFakeMetadataItems(),
-		},
-	}
-
-	pubsubComponent.Spec.Metadata = append(
-		pubsubComponent.Spec.Metadata,
-		components_v1alpha1.MetadataItem{
-			Name: "consumerID",
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte("{uuid}"),
-				},
-			},
-		}, components_v1alpha1.MetadataItem{
-			Name: "twoUUIDs",
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte("{uuid} {uuid}"),
-				},
-			},
-		})
-	rt := NewTestDaprRuntime(modes.StandaloneMode)
-	mockPubSub := new(daprt.MockPubSub)
-
-	rt.pubSubRegistry.Register(
-		pubsub_loader.New("mockPubSub", func() pubsub.PubSub {
-			return mockPubSub
-		}),
-	)
-
-	mockPubSub.On("Init", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
-		metadata := args.Get(0).(pubsub.Metadata)
-		consumerID := metadata.Properties["consumerID"]
-		uuid0, err := uuid.Parse(consumerID)
-		assert.Nil(t, err)
-
-		twoUUIDs := metadata.Properties["twoUUIDs"]
-		uuids := strings.Split(twoUUIDs, " ")
-		assert.Equal(t, 2, len(uuids))
-		uuid1, err := uuid.Parse(uuids[0])
-		assert.Nil(t, err)
-		uuid2, err := uuid.Parse(uuids[1])
-		assert.Nil(t, err)
-
-		assert.NotEqual(t, uuid0, uuid1)
-		assert.NotEqual(t, uuid0, uuid2)
-		assert.NotEqual(t, uuid1, uuid2)
-	})
-
-	err := rt.processComponentAndDependents(pubsubComponent)
-	assert.Nil(t, err)
-}
-
-func TestConsumerID(t *testing.T) {
-	metadata := []components_v1alpha1.MetadataItem{
-		{
-			Name: "host",
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte("localhost"),
-				},
-			},
-		},
-		{
-			Name: "password",
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte("fakePassword"),
-				},
-			},
-		},
-	}
-	pubsubComponent := components_v1alpha1.Component{
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name: TestPubsubName,
-		},
-		Spec: components_v1alpha1.ComponentSpec{
-			Type:     "pubsub.mockPubSub",
-			Version:  "v1",
-			Metadata: metadata,
-		},
-	}
-
-	rt := NewTestDaprRuntime(modes.StandaloneMode)
-	mockPubSub := new(daprt.MockPubSub)
-
-	rt.pubSubRegistry.Register(
-		pubsub_loader.New("mockPubSub", func() pubsub.PubSub {
-			return mockPubSub
-		}),
-	)
-
-	mockPubSub.On("Init", mock.Anything).Return(nil).Run(func(args mock.Arguments) {
-		metadata := args.Get(0).(pubsub.Metadata)
-		consumerID := metadata.Properties["consumerID"]
-		assert.Equal(t, TestRuntimeConfigID, consumerID)
-	})
-
-	err := rt.processComponentAndDependents(pubsubComponent)
-	assert.Nil(t, err)
-}
-
-func TestInitPubSub(t *testing.T) {
-	rt := NewTestDaprRuntime(modes.StandaloneMode)
-
-	pubsubComponents := []components_v1alpha1.Component{
-		{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: TestPubsubName,
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:     "pubsub.mockPubSub",
-				Version:  "v1",
-				Metadata: getFakeMetadataItems(),
-			},
-		}, {
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: TestSecondPubsubName,
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:     "pubsub.mockPubSub2",
-				Version:  "v1",
-				Metadata: getFakeMetadataItems(),
-			},
-		},
-	}
-
-	initMockPubSubForRuntime := func(rt *DaprRuntime) (*daprt.MockPubSub, *daprt.MockPubSub) {
-		mockPubSub := new(daprt.MockPubSub)
-
-		mockPubSub2 := new(daprt.MockPubSub)
-
-		rt.pubSubRegistry.Register(
-			pubsub_loader.New("mockPubSub", func() pubsub.PubSub {
-				return mockPubSub
-			}),
-
-			pubsub_loader.New("mockPubSub2", func() pubsub.PubSub {
-				return mockPubSub2
-			}),
-		)
-
-		expectedMetadata := pubsub.Metadata{
-			Properties: getFakeProperties(),
-		}
-
-		mockPubSub.On("Init", expectedMetadata).Return(nil)
-		mockPubSub.On(
-			"Subscribe",
-			mock.AnythingOfType("pubsub.SubscribeRequest"),
-			mock.AnythingOfType("func(*pubsub.NewMessage) error")).Return(nil)
-
-		mockPubSub2.On("Init", expectedMetadata).Return(nil)
-		mockPubSub2.On(
-			"Subscribe",
-			mock.AnythingOfType("pubsub.SubscribeRequest"),
-			mock.AnythingOfType("func(*pubsub.NewMessage) error")).Return(nil)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-		rt.topicRoutes = nil
-		rt.pubSubs = make(map[string]pubsub.PubSub)
-
-		return mockPubSub, mockPubSub2
-	}
-
-	t.Run("subscribe 2 topics", func(t *testing.T) {
-		mockPubSub, mockPubSub2 := initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 2 topics via http app channel
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		subs := getSubscriptionsJSONString(
-			[]string{"topic0", "topic1"}, // first pubsub
-			[]string{"topic0"})           // second pubsub
-		fakeResp.WithRawData([]byte(subs), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		rt.startSubscribing()
-
-		// assert
-		mockPubSub.AssertNumberOfCalls(t, "Init", 1)
-		mockPubSub2.AssertNumberOfCalls(t, "Init", 1)
-
-		mockPubSub.AssertNumberOfCalls(t, "Subscribe", 2)
-		mockPubSub2.AssertNumberOfCalls(t, "Subscribe", 1)
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("subscribe to topic with custom route", func(t *testing.T) {
-		mockPubSub, _ := initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes to a topic via http app channel
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		sub := getSubscriptionCustom("topic0", "customroute/topic0")
-		fakeResp.WithRawData([]byte(sub), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		rt.startSubscribing()
-
-		// assert
-		mockPubSub.AssertNumberOfCalls(t, "Init", 1)
-
-		mockPubSub.AssertNumberOfCalls(t, "Subscribe", 1)
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("subscribe 0 topics unless user app provides topic list", func(t *testing.T) {
-		mockPubSub, _ := initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-		fakeResp := invokev1.NewInvokeMethodResponse(404, "Not Found", nil)
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		rt.startSubscribing()
-
-		// assert
-		mockPubSub.AssertNumberOfCalls(t, "Init", 1)
-
-		mockPubSub.AssertNumberOfCalls(t, "Subscribe", 0)
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("publish adapter is nil, no pub sub component", func(t *testing.T) {
-		rt = NewTestDaprRuntime(modes.StandaloneMode)
-		a := rt.getPublishAdapter()
-		assert.Nil(t, a)
-	})
-
-	t.Run("publish adapter not nil, with pub sub component", func(t *testing.T) {
-		rt = NewTestDaprRuntime(modes.StandaloneMode)
-		rt.pubSubs[TestPubsubName], _ = initMockPubSubForRuntime(rt)
-		a := rt.getPublishAdapter()
-		assert.NotNil(t, a)
-	})
-
-	t.Run("load declarative subscription, no scopes", func(t *testing.T) {
-		dir := "./components"
-
-		rt = NewTestDaprRuntime(modes.StandaloneMode)
-
-		os.Mkdir(dir, 0777)
-		defer os.RemoveAll(dir)
-
-		s := testDeclarativeSubscription()
-
-		filePath := "./components/sub.yaml"
-		writeSubscriptionToDisk(s, filePath)
-
-		rt.runtimeConfig.Standalone.ComponentsPath = dir
-		subs := rt.getDeclarativeSubscriptions()
-		assert.Len(t, subs, 1)
-		assert.Equal(t, "topic1", subs[0].Topic)
-		assert.Equal(t, "myroute", subs[0].Route)
-		assert.Equal(t, "pubsub", subs[0].PubsubName)
-	})
-
-	t.Run("load declarative subscription, in scopes", func(t *testing.T) {
-		dir := "./components"
-
-		rt = NewTestDaprRuntime(modes.StandaloneMode)
-
-		os.Mkdir(dir, 0777)
-		defer os.RemoveAll(dir)
-
-		s := testDeclarativeSubscription()
-		s.Scopes = []string{TestRuntimeConfigID}
-
-		filePath := "./components/sub.yaml"
-		writeSubscriptionToDisk(s, filePath)
-
-		rt.runtimeConfig.Standalone.ComponentsPath = dir
-		subs := rt.getDeclarativeSubscriptions()
-		assert.Len(t, subs, 1)
-		assert.Equal(t, "topic1", subs[0].Topic)
-		assert.Equal(t, "myroute", subs[0].Route)
-		assert.Equal(t, "pubsub", subs[0].PubsubName)
-		assert.Equal(t, TestRuntimeConfigID, subs[0].Scopes[0])
-	})
-
-	t.Run("load declarative subscription, not in scopes", func(t *testing.T) {
-		dir := "./components"
-
-		rt = NewTestDaprRuntime(modes.StandaloneMode)
-
-		os.Mkdir(dir, 0777)
-		defer os.RemoveAll(dir)
-
-		s := testDeclarativeSubscription()
-		s.Scopes = []string{"scope1"}
-
-		filePath := "./components/sub.yaml"
-		writeSubscriptionToDisk(s, filePath)
-
-		rt.runtimeConfig.Standalone.ComponentsPath = dir
-		subs := rt.getDeclarativeSubscriptions()
-		assert.Len(t, subs, 0)
-	})
-
-	t.Run("test subscribe, app allowed 1 topic", func(t *testing.T) {
-		mockPubSub, mockPubSub2 := initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		subs := getSubscriptionsJSONString([]string{"topic0"}, []string{"topic1"})
-		fakeResp.WithRawData([]byte(subs), "application/json")
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		rt.startSubscribing()
-
-		// assert
-		mockPubSub.AssertNumberOfCalls(t, "Init", 1)
-		mockPubSub2.AssertNumberOfCalls(t, "Init", 1)
-
-		mockPubSub.AssertNumberOfCalls(t, "Subscribe", 1)
-		mockPubSub2.AssertNumberOfCalls(t, "Subscribe", 1)
-	})
-
-	t.Run("test subscribe, app allowed 2 topic", func(t *testing.T) {
-		mockPubSub, mockPubSub2 := initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-
-		// User App subscribes 2 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		subs := getSubscriptionsJSONString([]string{"topic0", "topic1"}, []string{"topic0"})
-		fakeResp.WithRawData([]byte(subs), "application/json")
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		rt.startSubscribing()
-
-		// assert
-		mockPubSub.AssertNumberOfCalls(t, "Init", 1)
-		mockPubSub2.AssertNumberOfCalls(t, "Init", 1)
-
-		mockPubSub.AssertNumberOfCalls(t, "Subscribe", 2)
-		mockPubSub2.AssertNumberOfCalls(t, "Subscribe", 1)
-	})
-
-	t.Run("test subscribe, app not allowed 1 topic", func(t *testing.T) {
-		mockPubSub, mockPubSub2 := initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		subs := getSubscriptionsJSONString([]string{"topic3"}, []string{"topic5"})
-		fakeResp.WithRawData([]byte(subs), "application/json")
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		// assert
-		mockPubSub.AssertNumberOfCalls(t, "Init", 1)
-		mockPubSub.AssertNumberOfCalls(t, "Subscribe", 0)
-
-		mockPubSub2.AssertNumberOfCalls(t, "Init", 1)
-		mockPubSub2.AssertNumberOfCalls(t, "Subscribe", 0)
-	})
-
-	t.Run("test subscribe, app not allowed 1 topic, allowed one topic", func(t *testing.T) {
-		mockPubSub, mockPubSub2 := initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-
-		// topic0 is allowed, topic3 and topic5 are not
-		subs := getSubscriptionsJSONString([]string{"topic0", "topic3"}, []string{"topic0", "topic5"})
-		fakeResp.WithRawData([]byte(subs), "application/json")
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		rt.startSubscribing()
-
-		// assert
-		mockPubSub.AssertNumberOfCalls(t, "Init", 1)
-		mockPubSub2.AssertNumberOfCalls(t, "Init", 1)
-
-		mockPubSub.AssertNumberOfCalls(t, "Subscribe", 1)
-		mockPubSub2.AssertNumberOfCalls(t, "Subscribe", 1)
-	})
-
-	t.Run("test publish, topic allowed", func(t *testing.T) {
-		initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		subs := getSubscriptionsJSONString([]string{"topic0"}, []string{"topic1"})
-		fakeResp.WithRawData([]byte(subs), "application/json")
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		rt.pubSubs[TestPubsubName] = &mockPublishPubSub{}
-		md := make(map[string]string, 2)
-		md["key"] = "v3"
-		err := rt.Publish(&pubsub.PublishRequest{
-			PubsubName: TestPubsubName,
-			Topic:      "topic0",
-			Metadata:   md,
-		})
-
-		assert.Nil(t, err)
-
-		rt.pubSubs[TestSecondPubsubName] = &mockPublishPubSub{}
-		err = rt.Publish(&pubsub.PublishRequest{
-			PubsubName: TestSecondPubsubName,
-			Topic:      "topic1",
-		})
-
-		assert.Nil(t, err)
-	})
-
-	t.Run("test publish, topic not allowed", func(t *testing.T) {
-		initMockPubSubForRuntime(rt)
-
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeReq := invokev1.NewInvokeMethodRequest("dapr/subscribe")
-		fakeReq.WithHTTPExtension(http.MethodGet, "")
-		fakeReq.WithRawData(nil, "application/json")
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		subs := getSubscriptionsJSONString([]string{"topic0"}, []string{"topic0"})
-		fakeResp.WithRawData([]byte(subs), "application/json")
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		for _, comp := range pubsubComponents {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		rt.pubSubs[TestPubsubName] = &mockPublishPubSub{}
-		err := rt.Publish(&pubsub.PublishRequest{
-			PubsubName: TestPubsubName,
-			Topic:      "topic5",
-		})
-		assert.NotNil(t, err)
-
-		rt.pubSubs[TestPubsubName] = &mockPublishPubSub{}
-		err = rt.Publish(&pubsub.PublishRequest{
-			PubsubName: TestSecondPubsubName,
-			Topic:      "topic5",
-		})
-		assert.NotNil(t, err)
-	})
-
-	t.Run("test allowed topics, no scopes, operation allowed", func(t *testing.T) {
-		rt.allowedTopics = map[string][]string{TestPubsubName: {"topic1"}}
-		a := rt.isPubSubOperationAllowed(TestPubsubName, "topic1", rt.scopedPublishings[TestPubsubName])
-		assert.True(t, a)
-	})
-
-	t.Run("test allowed topics, no scopes, operation not allowed", func(t *testing.T) {
-		rt.allowedTopics = map[string][]string{TestPubsubName: {"topic1"}}
-		a := rt.isPubSubOperationAllowed(TestPubsubName, "topic2", rt.scopedPublishings[TestPubsubName])
-		assert.False(t, a)
-	})
-
-	t.Run("test allowed topics, with scopes, operation allowed", func(t *testing.T) {
-		rt.allowedTopics = map[string][]string{TestPubsubName: {"topic1"}}
-		rt.scopedPublishings = map[string][]string{TestPubsubName: {"topic1"}}
-		a := rt.isPubSubOperationAllowed(TestPubsubName, "topic1", rt.scopedPublishings[TestPubsubName])
-		assert.True(t, a)
-	})
-
-	t.Run("topic in allowed topics, not in existing publishing scopes, operation not allowed", func(t *testing.T) {
-		rt.allowedTopics = map[string][]string{TestPubsubName: {"topic1"}}
-		rt.scopedPublishings = map[string][]string{TestPubsubName: {"topic2"}}
-		a := rt.isPubSubOperationAllowed(TestPubsubName, "topic1", rt.scopedPublishings[TestPubsubName])
-		assert.False(t, a)
-	})
-
-	t.Run("topic in allowed topics, not in publishing scopes, operation allowed", func(t *testing.T) {
-		rt.allowedTopics = map[string][]string{TestPubsubName: {"topic1"}}
-		rt.scopedPublishings = map[string][]string{}
-		a := rt.isPubSubOperationAllowed(TestPubsubName, "topic1", rt.scopedPublishings[TestPubsubName])
-		assert.True(t, a)
-	})
-
-	t.Run("topics A and B in allowed topics, A in publishing scopes, operation allowed for A only", func(t *testing.T) {
-		rt.allowedTopics = map[string][]string{TestPubsubName: {"A", "B"}}
-		rt.scopedPublishings = map[string][]string{TestPubsubName: {"A"}}
-
-		a := rt.isPubSubOperationAllowed(TestPubsubName, "A", rt.scopedPublishings[TestPubsubName])
-		assert.True(t, a)
-
-		b := rt.isPubSubOperationAllowed(TestPubsubName, "B", rt.scopedPublishings[TestPubsubName])
-		assert.False(t, b)
-	})
-}
-
-func TestInitSecretStores(t *testing.T) {
-	t.Run("init with store", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		m := NewMockKubernetesStore()
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetesMock", func() secretstores.SecretStore {
-				return m
-			}))
-
-		err := rt.processComponentAndDependents(components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetesMock",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetesMock",
-				Version: "v1",
-			},
-		})
-		assert.NoError(t, err)
-	})
-
-	t.Run("secret store is registered", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		m := NewMockKubernetesStore()
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetesMock", func() secretstores.SecretStore {
-				return m
-			}))
-
-		err := rt.processComponentAndDependents(components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetesMock",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetesMock",
-				Version: "v1",
-			},
-		})
-		assert.NoError(t, err)
-		assert.NotNil(t, rt.secretStores["kubernetesMock"])
-	})
-
-	t.Run("get secret store", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		m := NewMockKubernetesStore()
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetesMock", func() secretstores.SecretStore {
-				return m
-			}),
-		)
-
-		rt.processComponentAndDependents(components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetesMock",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetesMock",
-				Version: "v1",
-			},
-		})
-
-		s := rt.getSecretStore("kubernetesMock")
-		assert.NotNil(t, s)
-	})
-}
-
-func TestMetadataItemsToPropertiesConversion(t *testing.T) {
-	t.Run("string", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		items := []components_v1alpha1.MetadataItem{
-			{
-				Name: "a",
-				Value: components_v1alpha1.DynamicValue{
-					JSON: v1.JSON{Raw: []byte("b")},
-				},
-			},
-		}
-		m := rt.convertMetadataItemsToProperties(items)
-		assert.Equal(t, 1, len(m))
-		assert.Equal(t, "b", m["a"])
-	})
-
-	t.Run("int", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		items := []components_v1alpha1.MetadataItem{
-			{
-				Name: "a",
-				Value: components_v1alpha1.DynamicValue{
-					JSON: v1.JSON{Raw: []byte(strconv.Itoa(6))},
-				},
-			},
-		}
-		m := rt.convertMetadataItemsToProperties(items)
-		assert.Equal(t, 1, len(m))
-		assert.Equal(t, "6", m["a"])
-	})
-
-	t.Run("bool", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		items := []components_v1alpha1.MetadataItem{
-			{
-				Name: "a",
-				Value: components_v1alpha1.DynamicValue{
-					JSON: v1.JSON{Raw: []byte("true")},
-				},
-			},
-		}
-		m := rt.convertMetadataItemsToProperties(items)
-		assert.Equal(t, 1, len(m))
-		assert.Equal(t, "true", m["a"])
-	})
-
-	t.Run("float", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		items := []components_v1alpha1.MetadataItem{
-			{
-				Name: "a",
-				Value: components_v1alpha1.DynamicValue{
-					JSON: v1.JSON{Raw: []byte("5.5")},
-				},
-			},
-		}
-		m := rt.convertMetadataItemsToProperties(items)
-		assert.Equal(t, 1, len(m))
-		assert.Equal(t, "5.5", m["a"])
-	})
-
-	t.Run("JSON string", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		items := []components_v1alpha1.MetadataItem{
-			{
-				Name: "a",
-				Value: components_v1alpha1.DynamicValue{
-					JSON: v1.JSON{Raw: []byte(`"hello there"`)},
-				},
-			},
-		}
-		m := rt.convertMetadataItemsToProperties(items)
-		assert.Equal(t, 1, len(m))
-		assert.Equal(t, "hello there", m["a"])
-	})
 }
 
 func TestPopulateSecretsConfiguration(t *testing.T) {
 	t.Run("secret store configuration is populated", func(t *testing.T) {
 		// setup
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.globalConfig.Spec.Secrets.Scopes = []config.SecretsScope{
-			{
-				StoreName:     "testMock",
-				DefaultAccess: "allow",
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+		defer stopRuntime(t, rt)
+		rt.globalConfig.Spec.Secrets = &config.SecretsSpec{
+			Scopes: []config.SecretsScope{
+				{
+					StoreName:     "testMock",
+					DefaultAccess: "allow",
+				},
 			},
 		}
 
@@ -1147,1283 +719,1577 @@ func TestPopulateSecretsConfiguration(t *testing.T) {
 		rt.populateSecretsConfiguration()
 
 		// verify
-		assert.Contains(t, rt.secretsConfiguration, "testMock", "Expected testMock secret store configuration to be populated")
-		assert.Equal(t, config.AllowAccess, rt.secretsConfiguration["testMock"].DefaultAccess, "Expected default access as allow")
-		assert.Empty(t, rt.secretsConfiguration["testMock"].DeniedSecrets, "Expected testMock deniedSecrets to not be populated")
-		assert.NotContains(t, rt.secretsConfiguration["testMock"].AllowedSecrets, "Expected testMock allowedSecrets to not be populated")
+		secConf, ok := rt.compStore.GetSecretsConfiguration("testMock")
+		require.True(t, ok, "Expected testMock secret store configuration to be populated")
+		assert.Equal(t, config.AllowAccess, secConf.DefaultAccess, "Expected default access as allow")
+		assert.Empty(t, secConf.DeniedSecrets, "Expected testMock deniedSecrets to not be populated")
+		assert.NotContains(t, secConf.AllowedSecrets, "Expected testMock allowedSecrets to not be populated")
 	})
 }
 
-func TestProcessComponentSecrets(t *testing.T) {
-	mockBinding := components_v1alpha1.Component{
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name: "mockBinding",
-		},
-		Spec: components_v1alpha1.ComponentSpec{
-			Type:    "bindings.mock",
-			Version: "v1",
-			Metadata: []components_v1alpha1.MetadataItem{
-				{
-					Name: "a",
-					SecretKeyRef: components_v1alpha1.SecretKeyRef{
-						Key:  "key1",
-						Name: "name1",
-					},
-				},
-				{
-					Name: "b",
-					Value: components_v1alpha1.DynamicValue{
-						JSON: v1.JSON{Raw: []byte("value2")},
-					},
-				},
-			},
-		},
-		Auth: components_v1alpha1.Auth{
-			SecretStore: "kubernetes",
-		},
-	}
-
-	t.Run("Standalone Mode", func(t *testing.T) {
-		mockBinding.Spec.Metadata[0].Value = components_v1alpha1.DynamicValue{
-			JSON: v1.JSON{Raw: []byte("")},
-		}
-		mockBinding.Spec.Metadata[0].SecretKeyRef = components_v1alpha1.SecretKeyRef{
-			Key:  "key1",
-			Name: "name1",
-		}
-
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		m := NewMockKubernetesStore()
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetes", func() secretstores.SecretStore {
-				return m
-			}),
-		)
-
-		// add Kubernetes component manually
-		rt.processComponentAndDependents(components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetes",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetes",
-				Version: "v1",
-			},
-		})
-
-		mod, unready := rt.processComponentSecrets(mockBinding)
-		assert.Equal(t, "value1", mod.Spec.Metadata[0].Value.String())
-		assert.Empty(t, unready)
-	})
-
-	t.Run("Kubernetes Mode", func(t *testing.T) {
-		mockBinding.Spec.Metadata[0].Value = components_v1alpha1.DynamicValue{
-			JSON: v1.JSON{Raw: []byte("")},
-		}
-		mockBinding.Spec.Metadata[0].SecretKeyRef = components_v1alpha1.SecretKeyRef{
-			Key:  "key1",
-			Name: "name1",
-		}
-
-		rt := NewTestDaprRuntime(modes.KubernetesMode)
-		m := NewMockKubernetesStore()
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetes", func() secretstores.SecretStore {
-				return m
-			}),
-		)
-
-		// initSecretStore appends Kubernetes component even if kubernetes component is not added
-		for _, comp := range rt.builtinSecretStore() {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		mod, unready := rt.processComponentSecrets(mockBinding)
-		assert.Equal(t, "value1", mod.Spec.Metadata[0].Value.String())
-		assert.Empty(t, unready)
-	})
-
-	t.Run("Look up name only", func(t *testing.T) {
-		mockBinding.Spec.Metadata[0].Value = components_v1alpha1.DynamicValue{
-			JSON: v1.JSON{Raw: []byte("")},
-		}
-		mockBinding.Spec.Metadata[0].SecretKeyRef = components_v1alpha1.SecretKeyRef{
-			Name: "name1",
-		}
-
-		rt := NewTestDaprRuntime(modes.KubernetesMode)
-		m := NewMockKubernetesStore()
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetes", func() secretstores.SecretStore {
-				return m
-			}),
-		)
-
-		// initSecretStore appends Kubernetes component even if kubernetes component is not added
-		for _, comp := range rt.builtinSecretStore() {
-			err := rt.processComponentAndDependents(comp)
-			assert.Nil(t, err)
-		}
-
-		mod, unready := rt.processComponentSecrets(mockBinding)
-		assert.Equal(t, "value1", mod.Spec.Metadata[0].Value.String())
-		assert.Empty(t, unready)
-	})
-}
-
-func TestExtractComponentCategory(t *testing.T) {
-	compCategoryTests := []struct {
-		specType string
-		category string
-	}{
-		{"pubsub.redis", "pubsub"},
-		{"pubsubs.redis", ""},
-		{"secretstores.azure.keyvault", "secretstores"},
-		{"secretstore.azure.keyvault", ""},
-		{"state.redis", "state"},
-		{"states.redis", ""},
-		{"bindings.kafka", "bindings"},
-		{"binding.kafka", ""},
-		{"this.is.invalid.category", ""},
-	}
-
-	rt := NewTestDaprRuntime(modes.StandaloneMode)
-
-	for _, tt := range compCategoryTests {
-		t.Run(tt.specType, func(t *testing.T) {
-			fakeComp := components_v1alpha1.Component{
-				Spec: components_v1alpha1.ComponentSpec{
-					Type:    tt.specType,
-					Version: "v1",
-				},
-			}
-			assert.Equal(t, string(rt.extractComponentCategory(fakeComp)), tt.category)
-		})
-	}
-}
-
-// Test that flushOutstandingComponents waits for components
-func TestFlushOutstandingComponent(t *testing.T) {
-	t.Run("We can call flushOustandingComponents more than once", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		wasCalled := false
-		m := NewMockKubernetesStoreWithInitCallback(func() {
-			time.Sleep(100 * time.Millisecond)
-			wasCalled = true
-		})
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetesMock", func() secretstores.SecretStore {
-				return m
-			}))
-
-		go rt.processComponents()
-		rt.pendingComponents <- components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetesMock",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetesMock",
-				Version: "v1",
-			},
-		}
-		rt.flushOutstandingComponents()
-		assert.True(t, wasCalled)
-
-		// Make sure that the goroutine was restarted and can flush a second time
-		wasCalled = false
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetesMock2", func() secretstores.SecretStore {
-				return m
-			}))
-
-		rt.pendingComponents <- components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetesMock2",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetesMock",
-				Version: "v1",
-			},
-		}
-		rt.flushOutstandingComponents()
-		assert.True(t, wasCalled)
-	})
-	t.Run("flushOutstandingComponents blocks for components with outstanding dependanices", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		wasCalled := false
-		wasCalledChild := false
-		wasCalledGrandChild := false
-		m := NewMockKubernetesStoreWithInitCallback(func() {
-			time.Sleep(100 * time.Millisecond)
-			wasCalled = true
-		})
-		mc := NewMockKubernetesStoreWithInitCallback(func() {
-			time.Sleep(100 * time.Millisecond)
-			wasCalledChild = true
-		})
-		mgc := NewMockKubernetesStoreWithInitCallback(func() {
-			time.Sleep(100 * time.Millisecond)
-			wasCalledGrandChild = true
-		})
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetesMock", func() secretstores.SecretStore {
-				return m
-			}))
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetesMockChild", func() secretstores.SecretStore {
-				return mc
-			}))
-		rt.secretStoresRegistry.Register(
-			secretstores_loader.New("kubernetesMockGrandChild", func() secretstores.SecretStore {
-				return mgc
-			}))
-
-		go rt.processComponents()
-		rt.pendingComponents <- components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetesMockGrandChild",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetesMockGrandChild",
-				Version: "v1",
-				Metadata: []components_v1alpha1.MetadataItem{
-					{
-						Name: "a",
-						SecretKeyRef: components_v1alpha1.SecretKeyRef{
-							Key:  "key1",
-							Name: "name1",
-						},
-					},
-				},
-			},
-			Auth: components_v1alpha1.Auth{
-				SecretStore: "kubernetesMockChild",
-			},
-		}
-		rt.pendingComponents <- components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetesMockChild",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetesMockChild",
-				Version: "v1",
-				Metadata: []components_v1alpha1.MetadataItem{
-					{
-						Name: "a",
-						SecretKeyRef: components_v1alpha1.SecretKeyRef{
-							Key:  "key1",
-							Name: "name1",
-						},
-					},
-				},
-			},
-			Auth: components_v1alpha1.Auth{
-				SecretStore: "kubernetesMock",
-			},
-		}
-		rt.pendingComponents <- components_v1alpha1.Component{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "kubernetesMock",
-			},
-			Spec: components_v1alpha1.ComponentSpec{
-				Type:    "secretstores.kubernetesMock",
-				Version: "v1",
-			},
-		}
-		rt.flushOutstandingComponents()
-		assert.True(t, wasCalled)
-		assert.True(t, wasCalledChild)
-		assert.True(t, wasCalledGrandChild)
-	})
-}
-
-// Test InitSecretStore if secretstore.* refers to Kubernetes secret store
+// Test InitSecretStore if secretstore.* refers to Kubernetes secret store.
 func TestInitSecretStoresInKubernetesMode(t *testing.T) {
-	fakeSecretStoreWithAuth := components_v1alpha1.Component{
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name: "fakeSecretStore",
-		},
-		Spec: components_v1alpha1.ComponentSpec{
-			Type:    "secretstores.fake.secretstore",
-			Version: "v1",
-			Metadata: []components_v1alpha1.MetadataItem{
-				{
-					Name: "a",
-					SecretKeyRef: components_v1alpha1.SecretKeyRef{
-						Key:  "key1",
-						Name: "name1",
-					},
-				},
-				{
-					Name: "b",
-					Value: components_v1alpha1.DynamicValue{
-						JSON: v1.JSON{Raw: []byte("value2")},
-					},
-				},
+	t.Run("built-in secret store is added", func(t *testing.T) {
+		rt, _ := NewTestDaprRuntime(t, modes.KubernetesMode)
+
+		m := rtmock.NewMockKubernetesStore()
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
 			},
-		},
-		Auth: components_v1alpha1.Auth{
-			SecretStore: "kubernetes",
-		},
+			secretstoresLoader.BuiltinKubernetesSecretStore,
+		)
+
+		assertBuiltInSecretStore(t, rt)
+	})
+
+	t.Run("disable built-in secret store flag", func(t *testing.T) {
+		rt, _ := NewTestDaprRuntime(t, modes.KubernetesMode)
+		defer stopRuntime(t, rt)
+		rt.runtimeConfig.disableBuiltinK8sSecretStore = true
+
+		testOk := make(chan struct{})
+		defer close(testOk)
+		go func() {
+			// If the test fails, this call blocks forever, eventually causing a timeout
+			rt.appendBuiltinSecretStore(t.Context())
+			testOk <- struct{}{}
+		}()
+		select {
+		case <-testOk:
+			return
+		case <-time.After(5 * time.Second):
+			t.Fatalf("test failed")
+		}
+	})
+
+	t.Run("built-in secret store bypasses authorizers", func(t *testing.T) {
+		rt, _ := NewTestDaprRuntime(t, modes.KubernetesMode)
+		rt.authz = rt.authz.WithComponentAuthorizers([]authorizer.ComponentAuthorizer{
+			func(component componentsV1alpha1.Component) bool {
+				return false
+			},
+		})
+
+		m := rtmock.NewMockKubernetesStore()
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			secretstoresLoader.BuiltinKubernetesSecretStore,
+		)
+
+		assertBuiltInSecretStore(t, rt)
+	})
+}
+
+func assertBuiltInSecretStore(t *testing.T, rt *DaprRuntime) {
+	go rt.processor.Process(t.Context())
+	rt.appendBuiltinSecretStore(t.Context())
+	assert.Eventually(t, func() bool {
+		_, ok := rt.compStore.GetComponent(secretstoresLoader.BuiltinKubernetesSecretStore)
+		return ok
+	}, time.Second*2, time.Millisecond*100)
+
+	require.NoError(t, rt.runnerCloser.Close())
+}
+
+func NewTestDaprRuntime(t *testing.T, mode modes.DaprMode) (*DaprRuntime, error) {
+	return NewTestDaprRuntimeWithProtocol(t, mode, string(protocol.HTTPProtocol), 1024)
+}
+
+func NewTestDaprRuntimeWithID(t *testing.T, mode modes.DaprMode, id string) (*DaprRuntime, error) {
+	testRuntimeConfig := NewTestDaprRuntimeConfig(t, modes.StandaloneMode, string(protocol.HTTPProtocol), 1024)
+	testRuntimeConfig.id = id
+	rt, err := newDaprRuntime(t.Context(), testSecurity(t), testRuntimeConfig, &config.Configuration{}, &config.AccessControlList{}, resiliency.New(logger.NewLogger("test")))
+	if err != nil {
+		return nil, err
 	}
+	rt.runtimeConfig.mode = mode
+	rt.channels.Refresh()
+	rt.wfengine = wfenginefake.New()
+	return rt, nil
+}
 
-	rt := NewTestDaprRuntime(modes.KubernetesMode)
+func NewTestDaprRuntimeWithProtocol(t *testing.T, mode modes.DaprMode, protocol string, appPort int) (*DaprRuntime, error) {
+	testRuntimeConfig := NewTestDaprRuntimeConfig(t, modes.StandaloneMode, protocol, appPort)
+	rt, err := newDaprRuntime(t.Context(), testSecurity(t), testRuntimeConfig, &config.Configuration{}, &config.AccessControlList{}, resiliency.New(logger.NewLogger("test")))
+	if err != nil {
+		return nil, err
+	}
+	rt.runtimeConfig.mode = mode
+	rt.actors = actorsfake.New()
+	rt.channels.Refresh()
+	return rt, nil
+}
 
-	m := NewMockKubernetesStore()
-	rt.secretStoresRegistry.Register(
-		secretstores_loader.New("kubernetes", func() secretstores.SecretStore {
-			return m
+func NewTestDaprRuntimeConfig(t *testing.T, mode modes.DaprMode, appProtocol string, appPort int) *internalConfig {
+	return &internalConfig{
+		id:            daprt.TestRuntimeConfigID,
+		actorsService: "placement:10.10.10.12",
+		kubernetes: modeconfig.KubernetesConfig{
+			ControlPlaneAddress: "10.10.10.11",
+		},
+		allowedOrigins: cors.DefaultAllowedOrigins,
+		appConnectionConfig: config.AppConnectionConfig{
+			Protocol:       protocol.Protocol(appProtocol),
+			Port:           appPort,
+			MaxConcurrency: -1,
+			ChannelAddress: "127.0.0.1",
+		},
+		mode:                         mode,
+		httpPort:                     DefaultDaprHTTPPort,
+		internalGRPCPort:             0,
+		apiGRPCPort:                  0,
+		apiListenAddresses:           []string{DefaultAPIListenAddress},
+		publicPort:                   nil,
+		profilePort:                  DefaultProfilePort,
+		enableProfiling:              false,
+		mTLSEnabled:                  false,
+		sentryServiceAddress:         "",
+		maxRequestBodySize:           4 << 20,
+		readBufferSize:               4 << 10,
+		unixDomainSocket:             "",
+		gracefulShutdownDuration:     time.Second,
+		enableAPILogging:             ptr.Of(true),
+		schedulerStreams:             3,
+		disableBuiltinK8sSecretStore: false,
+		metricsExporter: metrics.New(metrics.Options{
+			Log:       log,
+			Namespace: metrics.DefaultMetricNamespace,
+			Healthz:   healthz.New(),
 		}),
-	)
-	for _, comp := range rt.builtinSecretStore() {
-		err := rt.processComponentAndDependents(comp)
-		assert.Nil(t, err)
-	}
-	fakeSecretStoreWithAuth, _ = rt.processComponentSecrets(fakeSecretStoreWithAuth)
-	// initSecretStore appends Kubernetes component even if kubernetes component is not added
-	assert.Equal(t, "value1", string(fakeSecretStoreWithAuth.Spec.Metadata[0].Value.Raw))
-}
-
-func TestOnNewPublishedMessage(t *testing.T) {
-	topic := "topic1"
-
-	envelope := pubsub.NewCloudEventsEnvelope("", "", pubsub.DefaultCloudEventType, "", topic, TestSecondPubsubName, "", []byte("Test Message"), "")
-	b, err := json.Marshal(envelope)
-	assert.Nil(t, err)
-
-	testPubSubMessage := &pubsub.NewMessage{
-		Topic:    topic,
-		Data:     b,
-		Metadata: map[string]string{pubsubName: TestPubsubName},
-	}
-
-	fakeReq := invokev1.NewInvokeMethodRequest(testPubSubMessage.Topic)
-	fakeReq.WithHTTPExtension(http.MethodPost, "")
-	fakeReq.WithRawData(testPubSubMessage.Data, contenttype.CloudEventContentType)
-
-	rt := NewTestDaprRuntime(modes.StandaloneMode)
-	rt.topicRoutes = map[string]TopicRoute{}
-	rt.topicRoutes[TestPubsubName] = TopicRoute{routes: make(map[string]Route)}
-	rt.topicRoutes[TestPubsubName].routes["topic1"] = Route{path: "topic1"}
-
-	t.Run("succeeded to publish message to user app with empty response", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		assert.Nil(t, err)
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("succeeded to publish message without TraceID", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-
-		delete(envelope, pubsub.TraceIDField)
-		bNoTraceID, err := json.Marshal(envelope)
-		assert.Nil(t, err)
-
-		message := &pubsub.NewMessage{
-			Topic:    topic,
-			Data:     bNoTraceID,
-			Metadata: map[string]string{pubsubName: TestPubsubName},
-		}
-
-		fakeReqNoTraceID := invokev1.NewInvokeMethodRequest(message.Topic)
-		fakeReqNoTraceID.WithHTTPExtension(http.MethodPost, "")
-		fakeReqNoTraceID.WithRawData(message.Data, contenttype.CloudEventContentType)
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeReqNoTraceID).Return(fakeResp, nil)
-
-		// act
-		err = rt.publishMessageHTTP(message)
-
-		// assert
-		assert.Nil(t, err)
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("succeeded to publish message to user app with non-json response", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("OK"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		assert.Nil(t, err)
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("succeeded to publish message to user app with status", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("{ \"status\": \"SUCCESS\"}"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		assert.Nil(t, err)
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("succeeded to publish message to user app but app ask for retry", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("{ \"status\": \"RETRY\"}"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		var cloudEvent map[string]interface{}
-		json := jsoniter.ConfigFastest
-		json.Unmarshal(testPubSubMessage.Data, &cloudEvent)
-		expectedClientError := errors.Errorf("RETRY status returned from app while processing pub/sub event %v", cloudEvent["id"].(string))
-		assert.Equal(t, expectedClientError.Error(), err.Error())
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("succeeded to publish message to user app but app ask to drop", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("{ \"status\": \"DROP\"}"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		assert.Nil(t, err)
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("succeeded to publish message to user app but app returned unknown status code", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("{ \"status\": \"not_valid\"}"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		assert.Error(t, err, "expected error on unknown status")
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("succeeded to publish message to user app but app returned empty status code", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("{ \"message\": \"empty status\"}"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		assert.NoError(t, err, "expected no error on empty status")
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("succeeded to publish message to user app and app returned unexpected json response", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("{ \"message\": \"success\"}"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		assert.Nil(t, err, "expected no error on unknown status")
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("failed to publish message error on invoking method", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-		invokeError := errors.New("error invoking method")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(nil, invokeError)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		expectedError := errors.Wrap(invokeError, "error from app channel while sending pub/sub event to app")
-		assert.Equal(t, expectedError.Error(), err.Error(), "expected errors to match")
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("failed to publish message to user app with 404", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		clientError := errors.New("Not Found")
-		fakeResp := invokev1.NewInvokeMethodResponse(404, "Not Found", nil)
-		fakeResp.WithRawData([]byte(clientError.Error()), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		assert.Nil(t, err, "expected error to be nil")
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-
-	t.Run("failed to publish message to user app with 500", func(t *testing.T) {
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		clientError := errors.New("Internal Error")
-		fakeResp := invokev1.NewInvokeMethodResponse(500, "Internal Error", nil)
-		fakeResp.WithRawData([]byte(clientError.Error()), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		// act
-		err := rt.publishMessageHTTP(testPubSubMessage)
-
-		// assert
-		var cloudEvent map[string]interface{}
-		json := jsoniter.ConfigFastest
-		json.Unmarshal(testPubSubMessage.Data, &cloudEvent)
-		expectedClientError := errors.Errorf("retriable error returned from app while processing pub/sub event %v: Internal Error. status code returned: 500", cloudEvent["id"].(string))
-		assert.Equal(t, expectedClientError.Error(), err.Error())
-		mockAppChannel.AssertNumberOfCalls(t, "InvokeMethod", 1)
-	})
-}
-
-func TestOnNewPublishedMessageGRPC(t *testing.T) {
-	topic := "topic1"
-
-	envelope := pubsub.NewCloudEventsEnvelope("", "", pubsub.DefaultCloudEventType, "", topic, TestSecondPubsubName, "", []byte("Test Message"), "")
-	b, err := json.Marshal(envelope)
-	assert.Nil(t, err)
-
-	testPubSubMessage := &pubsub.NewMessage{
-		Topic:    topic,
-		Data:     b,
-		Metadata: map[string]string{pubsubName: TestPubsubName},
-	}
-
-	envelope = pubsub.NewCloudEventsEnvelope("", "", pubsub.DefaultCloudEventType, "", topic, TestSecondPubsubName, "application/octet-stream", []byte{0x1}, "")
-	base64, err := json.Marshal(envelope)
-	assert.Nil(t, err)
-
-	testPubSubMessageBase64 := &pubsub.NewMessage{
-		Topic:    topic,
-		Data:     base64,
-		Metadata: map[string]string{pubsubName: TestPubsubName},
-	}
-
-	testCases := []struct {
-		name             string
-		message          *pubsub.NewMessage
-		responseStatus   runtimev1pb.TopicEventResponse_TopicEventResponseStatus
-		errorExpected    bool
-		noResponseStatus bool
-		responseError    error
-	}{
-		{
-			name:             "failed to publish message to user app with unimplemented error",
-			message:          testPubSubMessage,
-			noResponseStatus: true,
-			responseError:    status.Errorf(codes.Unimplemented, "unimplemented method"),
-			errorExpected:    false, // should be dropped with no error
-		},
-		{
-			name:             "failed to publish message to user app with response error",
-			message:          testPubSubMessage,
-			noResponseStatus: true,
-			responseError:    assert.AnError,
-			errorExpected:    true,
-		},
-		{
-			name:             "succeeded to publish message to user app with empty response",
-			message:          testPubSubMessage,
-			noResponseStatus: true,
-		},
-		{
-			name:           "succeeded to publish message to user app with success response",
-			message:        testPubSubMessage,
-			responseStatus: runtimev1pb.TopicEventResponse_SUCCESS,
-		},
-		{
-			name:           "succeeded to publish message to user app with base64 encoded cloud event",
-			message:        testPubSubMessageBase64,
-			responseStatus: runtimev1pb.TopicEventResponse_SUCCESS,
-		},
-		{
-			name:           "succeeded to publish message to user app with retry",
-			message:        testPubSubMessage,
-			responseStatus: runtimev1pb.TopicEventResponse_RETRY,
-			errorExpected:  true,
-		},
-		{
-			name:           "succeeded to publish message to user app with drop",
-			message:        testPubSubMessage,
-			responseStatus: runtimev1pb.TopicEventResponse_DROP,
-		},
-		{
-			name:           "succeeded to publish message to user app with invalid response",
-			message:        testPubSubMessage,
-			responseStatus: runtimev1pb.TopicEventResponse_TopicEventResponseStatus(99),
-			errorExpected:  true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// setup
-			// getting new port for every run to avoid conflict and timing issues between tests if sharing same port
-			port, _ := freeport.GetFreePort()
-			rt := NewTestDaprRuntimeWithProtocol(modes.StandaloneMode, string(GRPCProtocol), port)
-			rt.topicRoutes = map[string]TopicRoute{}
-			rt.topicRoutes[TestPubsubName] = TopicRoute{
-				routes: map[string]Route{
-					topic: {path: topic},
-				},
-			}
-			var grpcServer *grpc.Server
-
-			// create mock application server first
-			if !tc.noResponseStatus {
-				grpcServer = startTestAppCallbackGRPCServer(t, port, &channelt.MockServer{
-					TopicEventResponseStatus: tc.responseStatus,
-					Error:                    tc.responseError,
-				})
-			} else {
-				grpcServer = startTestAppCallbackGRPCServer(t, port, &channelt.MockServer{
-					Error: tc.responseError,
-				})
-			}
-			if grpcServer != nil {
-				// properly stop the gRPC server
-				defer grpcServer.Stop()
-			}
-
-			// create a new AppChannel and gRPC client for every test
-			rt.createAppChannel()
-			// properly close the app channel created
-			defer rt.grpc.AppClient.Close()
-
-			// act
-			err = rt.publishMessageGRPC(tc.message)
-
-			// assert
-			if tc.errorExpected {
-				assert.Error(t, err, "expected an error")
-			} else {
-				assert.Nil(t, err, "expected no error")
-			}
-		})
+		healthz:         healthz.New(),
+		outboundHealthz: healthz.New(),
+		registry: registry.New(registry.NewOptions().
+			WithStateStores(stateLoader.NewRegistry()).
+			WithSecretStores(secretstoresLoader.NewRegistry()).
+			WithNameResolutions(nrLoader.NewRegistry()).
+			WithBindings(bindingsLoader.NewRegistry()).
+			WithPubSubs(pubsubLoader.NewRegistry()).
+			WithHTTPMiddlewares(httpMiddlewareLoader.NewRegistry()).
+			WithConfigurations(configurationLoader.NewRegistry()).
+			WithLocks(lockLoader.NewRegistry())),
 	}
 }
 
-func TestGetSubscribedBindingsGRPC(t *testing.T) {
-	testCases := []struct {
-		name             string
-		expectedResponse []string
-		responseError    error
-		responseFromApp  []string
-	}{
-		{
-			name:             "get list of subscriber bindings success",
-			expectedResponse: []string{"binding1", "binding2"},
-			responseFromApp:  []string{"binding1", "binding2"},
-		},
-		{
-			name:             "get list of subscriber bindings error from app",
-			expectedResponse: []string{},
-			responseError:    assert.AnError,
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			port, _ := freeport.GetFreePort()
-			rt := NewTestDaprRuntimeWithProtocol(modes.StandaloneMode, string(GRPCProtocol), port)
-			// create mock application server first
-			grpcServer := startTestAppCallbackGRPCServer(t, port, &channelt.MockServer{
-				Error:    tc.responseError,
-				Bindings: tc.responseFromApp,
-			})
-			defer grpcServer.Stop()
-
-			// create a new AppChannel and gRPC client for every test
-			rt.createAppChannel()
-			// properly close the app channel created
-			defer rt.grpc.AppClient.Close()
-
-			// act
-			resp := rt.getSubscribedBindingsGRPC()
-
-			// assert
-			assert.Equal(t, tc.expectedResponse, resp, "expected response to match")
-		})
-	}
+func TestGracefulShutdown(t *testing.T) {
+	r, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, r.runtimeConfig.gracefulShutdownDuration)
 }
 
-func startTestAppCallbackGRPCServer(t *testing.T, port int, mockServer runtimev1pb.AppCallbackServer) *grpc.Server {
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	assert.NoError(t, err)
-	grpcServer := grpc.NewServer()
-	go func() {
-		runtimev1pb.RegisterAppCallbackServer(grpcServer, mockServer)
-		if err := grpcServer.Serve(lis); err != nil {
-			panic(err)
-		}
-	}()
-	// wait until server starts
-	time.Sleep(maxGRPCServerUptime)
-
-	return grpcServer
-}
-
-func getFakeProperties() map[string]string {
-	return map[string]string{
-		"host":                    "localhost",
-		"password":                "fakePassword",
-		"consumerID":              TestRuntimeConfigID,
-		scopes.SubscriptionScopes: fmt.Sprintf("%s=topic0,topic1", TestRuntimeConfigID),
-		scopes.PublishingScopes:   fmt.Sprintf("%s=topic0,topic1", TestRuntimeConfigID),
-	}
-}
-
-func getFakeMetadataItems() []components_v1alpha1.MetadataItem {
-	return []components_v1alpha1.MetadataItem{
-		{
-			Name: "host",
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte("localhost"),
-				},
-			},
-		},
-		{
-			Name: "password",
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte("fakePassword"),
-				},
-			},
-		},
-		{
-			Name: "consumerID",
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte(TestRuntimeConfigID),
-				},
-			},
-		},
-		{
-			Name: scopes.SubscriptionScopes,
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte(fmt.Sprintf("%s=topic0,topic1", TestRuntimeConfigID)),
-				},
-			},
-		},
-		{
-			Name: scopes.PublishingScopes,
-			Value: components_v1alpha1.DynamicValue{
-				JSON: v1.JSON{
-					Raw: []byte(fmt.Sprintf("%s=topic0,topic1", TestRuntimeConfigID)),
-				},
-			},
-		},
-	}
-}
-
-func NewTestDaprRuntime(mode modes.DaprMode) *DaprRuntime {
-	return NewTestDaprRuntimeWithProtocol(mode, string(HTTPProtocol), 1024)
-}
-
-func NewTestDaprRuntimeWithProtocol(mode modes.DaprMode, protocol string, appPort int) *DaprRuntime {
-	testRuntimeConfig := NewRuntimeConfig(
-		TestRuntimeConfigID,
-		[]string{"10.10.10.12"},
-		"10.10.10.11",
-		cors.DefaultAllowedOrigins,
-		"globalConfig",
-		"",
-		protocol,
-		string(mode),
-		DefaultDaprHTTPPort,
-		0,
-		DefaultDaprAPIGRPCPort,
-		appPort,
-		DefaultProfilePort,
-		false,
-		-1,
-		false,
-		"",
-		false, 4)
-
-	rt := NewDaprRuntime(testRuntimeConfig, &config.Configuration{}, &config.AccessControlList{})
-	return rt
-}
-
-func TestMTLS(t *testing.T) {
-	t.Run("with mTLS enabled", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.runtimeConfig.mtlsEnabled = true
-		rt.runtimeConfig.SentryServiceAddress = "1.1.1.1"
-
-		os.Setenv(certs.TrustAnchorsEnvVar, testCertRoot)
-		os.Setenv(certs.CertChainEnvVar, "a")
-		os.Setenv(certs.CertKeyEnvVar, "b")
-		defer os.Clearenv()
-
-		certChain, err := security.GetCertChain()
-		assert.Nil(t, err)
-		rt.runtimeConfig.CertChain = certChain
-
-		err = rt.establishSecurity(rt.runtimeConfig.SentryServiceAddress)
-		assert.Nil(t, err)
-		assert.NotNil(t, rt.authenticator)
+func TestPodName(t *testing.T) {
+	t.Run("empty podName", func(t *testing.T) {
+		assert.Empty(t, getPodName())
 	})
 
-	t.Run("with mTLS disabled", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-
-		err := rt.establishSecurity(rt.runtimeConfig.SentryServiceAddress)
-		assert.Nil(t, err)
-		assert.Nil(t, rt.authenticator)
+	t.Run("non-empty podName", func(t *testing.T) {
+		t.Setenv("POD_NAME", "testPodName")
+		assert.Equal(t, "testPodName", getPodName())
 	})
-}
-
-type mockBinding struct {
-	hasError bool
-	data     string
-	metadata map[string]string
-}
-
-func (b *mockBinding) Init(metadata bindings.Metadata) error {
-	return nil
-}
-
-func (b *mockBinding) Read(handler func(*bindings.ReadResponse) error) error {
-	b.data = string(testInputBindingData)
-	metadata := map[string]string{}
-	if b.metadata != nil {
-		metadata = b.metadata
-	}
-
-	err := handler(&bindings.ReadResponse{
-		Metadata: metadata,
-		Data:     []byte(b.data),
-	})
-	b.hasError = err != nil
-	return nil
-}
-
-func (b *mockBinding) Operations() []bindings.OperationKind {
-	return []bindings.OperationKind{"create"}
-}
-
-func (b *mockBinding) Invoke(req *bindings.InvokeRequest) (*bindings.InvokeResponse, error) {
-	return nil, nil
-}
-
-func TestInvokeOutputBindings(t *testing.T) {
-	t.Run("output binding missing operation", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-
-		_, err := rt.sendToOutputBinding("mockBinding", &bindings.InvokeRequest{
-			Data: []byte(""),
-		})
-		assert.NotNil(t, err)
-		assert.Equal(t, "operation field is missing from request", err.Error())
-	})
-
-	t.Run("output binding valid operation", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.outputBindings["mockBinding"] = &mockBinding{}
-
-		_, err := rt.sendToOutputBinding("mockBinding", &bindings.InvokeRequest{
-			Data:      []byte(""),
-			Operation: bindings.CreateOperation,
-		})
-		assert.Nil(t, err)
-	})
-
-	t.Run("output binding invalid operation", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.outputBindings["mockBinding"] = &mockBinding{}
-
-		_, err := rt.sendToOutputBinding("mockBinding", &bindings.InvokeRequest{
-			Data:      []byte(""),
-			Operation: bindings.GetOperation,
-		})
-		assert.NotNil(t, err)
-		assert.Equal(t, "binding mockBinding does not support operation get. supported operations: create", err.Error())
-	})
-}
-
-func TestReadInputBindings(t *testing.T) {
-	const testInputBindingName = "inputbinding"
-	const testInputBindingMethod = "inputbinding"
-
-	t.Run("app acknowledge, no retry", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeBindingReq := invokev1.NewInvokeMethodRequest(testInputBindingMethod)
-		fakeBindingReq.WithHTTPExtension(http.MethodOptions, "")
-		fakeBindingReq.WithRawData(nil, invokev1.JSONContentType)
-
-		fakeBindingResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-
-		fakeReq := invokev1.NewInvokeMethodRequest(testInputBindingMethod)
-		fakeReq.WithHTTPExtension(http.MethodPost, "")
-		fakeReq.WithRawData(testInputBindingData, "application/json")
-		fakeReq.WithMetadata(map[string][]string{})
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("OK"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeBindingReq).Return(fakeBindingResp, nil)
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		rt.appChannel = mockAppChannel
-
-		b := mockBinding{}
-		rt.readFromBinding(testInputBindingName, &b)
-
-		assert.False(t, b.hasError)
-	})
-
-	t.Run("app returns error", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeBindingReq := invokev1.NewInvokeMethodRequest(testInputBindingMethod)
-		fakeBindingReq.WithHTTPExtension(http.MethodOptions, "")
-		fakeBindingReq.WithRawData(nil, invokev1.JSONContentType)
-
-		fakeBindingResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-
-		fakeReq := invokev1.NewInvokeMethodRequest(testInputBindingMethod)
-		fakeReq.WithHTTPExtension(http.MethodPost, "")
-		fakeReq.WithRawData(testInputBindingData, "application/json")
-		fakeReq.WithMetadata(map[string][]string{})
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(500, "Internal Error", nil)
-		fakeResp.WithRawData([]byte("Internal Error"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeBindingReq).Return(fakeBindingResp, nil)
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		rt.appChannel = mockAppChannel
-
-		b := mockBinding{}
-		rt.readFromBinding(testInputBindingName, &b)
-
-		assert.True(t, b.hasError)
-	})
-
-	t.Run("binding has data and metadata", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		mockAppChannel := new(channelt.MockAppChannel)
-		rt.appChannel = mockAppChannel
-
-		fakeBindingReq := invokev1.NewInvokeMethodRequest(testInputBindingMethod)
-		fakeBindingReq.WithHTTPExtension(http.MethodOptions, "")
-		fakeBindingReq.WithRawData(nil, invokev1.JSONContentType)
-
-		fakeBindingResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-
-		fakeReq := invokev1.NewInvokeMethodRequest(testInputBindingMethod)
-		fakeReq.WithHTTPExtension(http.MethodPost, "")
-		fakeReq.WithRawData(testInputBindingData, "application/json")
-		fakeReq.WithMetadata(map[string][]string{"bindings": {"input"}})
-
-		// User App subscribes 1 topics via http app channel
-		fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
-		fakeResp.WithRawData([]byte("OK"), "application/json")
-
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.emptyCtx"), fakeBindingReq).Return(fakeBindingResp, nil)
-		mockAppChannel.On("InvokeMethod", mock.AnythingOfType("*context.valueCtx"), fakeReq).Return(fakeResp, nil)
-
-		rt.appChannel = mockAppChannel
-
-		b := mockBinding{metadata: map[string]string{"bindings": "input"}}
-		rt.readFromBinding(testInputBindingName, &b)
-
-		assert.Equal(t, string(testInputBindingData), b.data)
-	})
-}
-
-func TestNamespace(t *testing.T) {
-	t.Run("empty namespace", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		ns := rt.getNamespace()
-
-		assert.Empty(t, ns)
-	})
-
-	t.Run("non-empty namespace", func(t *testing.T) {
-		os.Setenv("NAMESPACE", "a")
-		defer os.Clearenv()
-
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		ns := rt.getNamespace()
-
-		assert.Equal(t, "a", ns)
-	})
-}
-
-func TestAuthorizedComponents(t *testing.T) {
-	testCompName := "fakeComponent"
-
-	t.Run("standalone mode, no namespce", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		component := components_v1alpha1.Component{}
-		component.ObjectMeta.Name = testCompName
-
-		comps := rt.getAuthorizedComponents([]components_v1alpha1.Component{component})
-		assert.True(t, len(comps) == 1)
-		assert.Equal(t, testCompName, comps[0].Name)
-	})
-
-	t.Run("namespace mismatch", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.namespace = "a"
-
-		component := components_v1alpha1.Component{}
-		component.ObjectMeta.Name = testCompName
-		component.ObjectMeta.Namespace = "b"
-
-		comps := rt.getAuthorizedComponents([]components_v1alpha1.Component{component})
-		assert.True(t, len(comps) == 0)
-	})
-
-	t.Run("namespace match", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.namespace = "a"
-
-		component := components_v1alpha1.Component{}
-		component.ObjectMeta.Name = testCompName
-		component.ObjectMeta.Namespace = "a"
-
-		comps := rt.getAuthorizedComponents([]components_v1alpha1.Component{component})
-		assert.True(t, len(comps) == 1)
-	})
-
-	t.Run("in scope, namespace match", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.namespace = "a"
-
-		component := components_v1alpha1.Component{}
-		component.ObjectMeta.Name = testCompName
-		component.ObjectMeta.Namespace = "a"
-		component.Scopes = []string{TestRuntimeConfigID}
-
-		comps := rt.getAuthorizedComponents([]components_v1alpha1.Component{component})
-		assert.True(t, len(comps) == 1)
-	})
-
-	t.Run("not in scope, namespace match", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.namespace = "a"
-
-		component := components_v1alpha1.Component{}
-		component.ObjectMeta.Name = testCompName
-		component.ObjectMeta.Namespace = "a"
-		component.Scopes = []string{"other"}
-
-		comps := rt.getAuthorizedComponents([]components_v1alpha1.Component{component})
-		assert.True(t, len(comps) == 0)
-	})
-
-	t.Run("in scope, namespace mismatch", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.namespace = "a"
-
-		component := components_v1alpha1.Component{}
-		component.ObjectMeta.Name = testCompName
-		component.ObjectMeta.Namespace = "b"
-		component.Scopes = []string{TestRuntimeConfigID}
-
-		comps := rt.getAuthorizedComponents([]components_v1alpha1.Component{component})
-		assert.True(t, len(comps) == 0)
-	})
-
-	t.Run("not in scope, namespace mismatch", func(t *testing.T) {
-		rt := NewTestDaprRuntime(modes.StandaloneMode)
-		rt.namespace = "a"
-
-		component := components_v1alpha1.Component{}
-		component.ObjectMeta.Name = testCompName
-		component.ObjectMeta.Namespace = "b"
-		component.Scopes = []string{"other"}
-
-		comps := rt.getAuthorizedComponents([]components_v1alpha1.Component{component})
-		assert.True(t, len(comps) == 0)
-	})
-}
-
-type mockPublishPubSub struct {
-}
-
-// Init is a mock initialization method
-func (m *mockPublishPubSub) Init(metadata pubsub.Metadata) error {
-	return nil
-}
-
-// Publish is a mock publish method
-func (m *mockPublishPubSub) Publish(req *pubsub.PublishRequest) error {
-	return nil
-}
-
-// Subscribe is a mock subscribe method
-func (m *mockPublishPubSub) Subscribe(req pubsub.SubscribeRequest, handler func(msg *pubsub.NewMessage) error) error {
-	return nil
-}
-
-func (m *mockPublishPubSub) Close() error {
-	return nil
-}
-
-func (m *mockPublishPubSub) Features() []pubsub.Feature {
-	return nil
 }
 
 func TestInitActors(t *testing.T) {
 	t.Run("missing namespace on kubernetes", func(t *testing.T) {
-		r := NewDaprRuntime(&Config{Mode: modes.KubernetesMode}, &config.Configuration{}, &config.AccessControlList{})
+		r, err := NewTestDaprRuntime(t, modes.KubernetesMode)
+		require.NoError(t, err)
+		defer stopRuntime(t, r)
 		r.namespace = ""
-		r.runtimeConfig.mtlsEnabled = true
+		r.runtimeConfig.mTLSEnabled = true
 
-		err := r.initActors()
-		assert.Error(t, err)
+		err = r.initActors(t.Context())
+		require.Error(t, err)
 	})
 
 	t.Run("actors hosted = true", func(t *testing.T) {
-		r := NewDaprRuntime(&Config{Mode: modes.KubernetesMode}, &config.Configuration{}, &config.AccessControlList{})
+		r, err := NewTestDaprRuntime(t, modes.KubernetesMode)
+		require.NoError(t, err)
+		defer stopRuntime(t, r)
 		r.appConfig = config.ApplicationConfig{
 			Entities: []string{"actor1"},
 		}
 
-		hosted := r.hostingActors()
+		hosted := len(r.appConfig.Entities) > 0
 		assert.True(t, hosted)
 	})
 
 	t.Run("actors hosted = false", func(t *testing.T) {
-		r := NewDaprRuntime(&Config{Mode: modes.KubernetesMode}, &config.Configuration{}, &config.AccessControlList{})
+		r, err := NewTestDaprRuntime(t, modes.KubernetesMode)
+		require.NoError(t, err)
+		defer stopRuntime(t, r)
 
-		hosted := r.hostingActors()
+		hosted := len(r.appConfig.Entities) > 0
 		assert.False(t, hosted)
+	})
+
+	t.Run("placement enable = false", func(t *testing.T) {
+		r, err := newDaprRuntime(t.Context(), testSecurity(t), &internalConfig{
+			schedulerStreams: 3,
+			metricsExporter: metrics.New(metrics.Options{
+				Log:       log,
+				Namespace: metrics.DefaultMetricNamespace,
+				Healthz:   healthz.New(),
+			}),
+			mode:     modes.StandaloneMode,
+			registry: registry.New(registry.NewOptions()),
+			healthz:  healthz.New(),
+		}, &config.Configuration{}, &config.AccessControlList{}, resiliency.New(logger.NewLogger("test")))
+		require.NoError(t, err)
+		defer stopRuntime(t, r)
+		r.channels.Refresh()
+
+		err = r.initActors(t.Context())
+		require.NoError(t, err)
+	})
+
+	t.Run("the state stores can still be initialized normally", func(t *testing.T) {
+		r, err := newDaprRuntime(t.Context(), testSecurity(t), &internalConfig{
+			metricsExporter: metrics.New(metrics.Options{
+				Log:       log,
+				Namespace: metrics.DefaultMetricNamespace,
+				Healthz:   healthz.New(),
+			}),
+			mode:             modes.StandaloneMode,
+			registry:         registry.New(registry.NewOptions()),
+			healthz:          healthz.New(),
+			schedulerStreams: 3,
+		}, &config.Configuration{}, &config.AccessControlList{}, resiliency.New(logger.NewLogger("test")))
+		require.NoError(t, err)
+		defer stopRuntime(t, r)
+		r.channels.Refresh()
+
+		assert.NotNil(t, r.compStore.ListStateStores())
+		assert.Equal(t, 0, r.compStore.StateStoresLen())
+	})
+
+	t.Run("the actor store can not be initialized normally", func(t *testing.T) {
+		r, err := newDaprRuntime(t.Context(), testSecurity(t), &internalConfig{
+			metricsExporter: metrics.New(metrics.Options{
+				Log:       log,
+				Namespace: metrics.DefaultMetricNamespace,
+				Healthz:   healthz.New(),
+			}),
+			mode:             modes.StandaloneMode,
+			registry:         registry.New(registry.NewOptions()),
+			healthz:          healthz.New(),
+			schedulerStreams: 3,
+		}, &config.Configuration{}, &config.AccessControlList{}, resiliency.New(logger.NewLogger("test")))
+		require.NoError(t, err)
+		defer stopRuntime(t, r)
+		r.channels.Refresh()
+
+		name, ok := r.processor.State().ActorStateStoreName()
+		assert.False(t, ok)
+		assert.Equal(t, "", name)
+		err = r.initActors(t.Context())
+		require.NoError(t, err)
 	})
 }
 
-func TestInitBindings(t *testing.T) {
-	t.Run("single input binding", func(t *testing.T) {
-		r := NewDaprRuntime(&Config{}, &config.Configuration{}, &config.AccessControlList{})
-		r.bindingsRegistry.RegisterInputBindings(
-			bindings_loader.NewInput("testInputBinding", func() bindings.InputBinding {
-				return &daprt.MockBinding{}
-			}),
-		)
+func TestActorReentrancyConfig(t *testing.T) {
+	fullConfig := `{
+		"entities":["actorType1", "actorType2"],
+		"actorIdleTimeout": "1h",
+		"drainOngoingCallTimeout": "30s",
+		"drainRebalancedActors": true,
+		"reentrancy": {
+		  "enabled": true,
+		  "maxStackDepth": 64
+		}
+	  }`
+	limit := 64
 
-		c := components_v1alpha1.Component{}
-		c.ObjectMeta.Name = "testInputBinding"
-		c.Spec.Type = "bindings.testInputBinding"
-		err := r.initBinding(c)
-		assert.NoError(t, err)
+	minimumConfig := `{
+		"entities":["actorType1", "actorType2"],
+		"actorIdleTimeout": "1h",
+		"drainOngoingCallTimeout": "30s",
+		"drainRebalancedActors": true,
+		"reentrancy": {
+		  "enabled": true
+		}
+	  }`
+
+	emptyConfig := `{
+		"entities":["actorType1", "actorType2"],
+		"actorIdleTimeout": "1h",
+		"drainOngoingCallTimeout": "30s",
+		"drainRebalancedActors": true
+	  }`
+
+	testcases := []struct {
+		Name               string
+		Config             []byte
+		ExpectedReentrancy bool
+		ExpectedLimit      *int
+	}{
+		{
+			Name:               "Test full configuration",
+			Config:             []byte(fullConfig),
+			ExpectedReentrancy: true,
+			ExpectedLimit:      &limit,
+		},
+		{
+			Name:               "Test minimum configuration",
+			Config:             []byte(minimumConfig),
+			ExpectedReentrancy: true,
+			ExpectedLimit:      nil,
+		},
+		{
+			Name:               "Test minimum configuration",
+			Config:             []byte(emptyConfig),
+			ExpectedReentrancy: false,
+			ExpectedLimit:      nil,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.Name, func(t *testing.T) {
+			r, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+			require.NoError(t, err)
+
+			mockAppChannel := new(channelt.MockAppChannel)
+			r.channels.WithAppChannel(mockAppChannel)
+			r.runtimeConfig.appConnectionConfig.Protocol = protocol.HTTPProtocol
+
+			configResp := config.ApplicationConfig{}
+			json.Unmarshal(tc.Config, &configResp)
+
+			mockAppChannel.On("GetAppConfig").Return(&configResp, nil)
+
+			r.loadAppConfiguration(t.Context())
+
+			assert.NotNil(t, r.appConfig)
+
+			assert.Equal(t, tc.ExpectedReentrancy, r.appConfig.Reentrancy.Enabled)
+			assert.Equal(t, tc.ExpectedLimit, r.appConfig.Reentrancy.MaxStackDepth)
+		})
+	}
+}
+
+type mockPubSub struct {
+	pubsub.PubSub
+	closeErr error
+}
+
+func (p *mockPubSub) Init(ctx context.Context, metadata pubsub.Metadata) error {
+	return nil
+}
+
+func (p *mockPubSub) Close() error {
+	return p.closeErr
+}
+
+type mockStateStore struct {
+	state.Store
+	closeErr error
+}
+
+func (s *mockStateStore) Init(ctx context.Context, metadata state.Metadata) error {
+	return nil
+}
+
+func (s *mockStateStore) Close() error {
+	return s.closeErr
+}
+
+func TestCloseWithErrors(t *testing.T) {
+	rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+	require.NoError(t, err)
+
+	testErr := errors.New("mock close error")
+
+	rt.runtimeConfig.registry.Bindings().RegisterOutputBinding(
+		func(_ logger.Logger) bindings.OutputBinding {
+			return &rtmock.Binding{CloseErr: testErr}
+		},
+		"output",
+	)
+	rt.runtimeConfig.registry.PubSubs().RegisterComponent(
+		func(_ logger.Logger) pubsub.PubSub {
+			return &mockPubSub{closeErr: testErr}
+		},
+		"pubsub",
+	)
+	rt.runtimeConfig.registry.StateStores().RegisterComponent(
+		func(_ logger.Logger) state.Store {
+			return &mockStateStore{closeErr: testErr}
+		},
+		"statestore",
+	)
+	rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+		func(_ logger.Logger) secretstores.SecretStore {
+			return &rtmock.SecretStore{CloseErr: testErr}
+		},
+		"secretstore",
+	)
+
+	mockOutputBindingComponent := componentsV1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "binding",
+		},
+		Spec: componentsV1alpha1.ComponentSpec{
+			Type:    "bindings.output",
+			Version: "v1",
+			Metadata: []commonapi.NameValuePair{
+				{
+					Name: "output",
+					Value: commonapi.DynamicValue{
+						JSON: v1.JSON{},
+					},
+				},
+			},
+		},
+	}
+	mockPubSubComponent := componentsV1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pubsub",
+		},
+		Spec: componentsV1alpha1.ComponentSpec{
+			Type:    "pubsub.pubsub",
+			Version: "v1",
+			Metadata: []commonapi.NameValuePair{
+				{
+					Name: "pubsub",
+					Value: commonapi.DynamicValue{
+						JSON: v1.JSON{},
+					},
+				},
+			},
+		},
+	}
+	mockStateComponent := componentsV1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "state",
+		},
+		Spec: componentsV1alpha1.ComponentSpec{
+			Type:    "state.statestore",
+			Version: "v1",
+			Metadata: []commonapi.NameValuePair{
+				{
+					Name: "statestore",
+					Value: commonapi.DynamicValue{
+						JSON: v1.JSON{},
+					},
+				},
+			},
+		},
+	}
+	mockSecretsComponent := componentsV1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "secret",
+		},
+		Spec: componentsV1alpha1.ComponentSpec{
+			Type:    "secretstores.secretstore",
+			Version: "v1",
+			Metadata: []commonapi.NameValuePair{
+				{
+					Name: "secretstore",
+					Value: commonapi.DynamicValue{
+						JSON: v1.JSON{},
+					},
+				},
+			},
+		},
+	}
+
+	errCh := make(chan error)
+	go func() {
+		errCh <- rt.Run(t.Context())
+	}()
+
+	rt.processor.AddPendingComponent(t.Context(), mockOutputBindingComponent)
+	rt.processor.AddPendingComponent(t.Context(), mockPubSubComponent)
+	rt.processor.AddPendingComponent(t.Context(), mockStateComponent)
+	rt.processor.AddPendingComponent(t.Context(), mockSecretsComponent)
+
+	err = rt.runnerCloser.Close()
+	require.Error(t, err)
+	assert.Len(t, strings.Split(err.Error(), "\n"), 4)
+	select {
+	case rErr := <-errCh:
+		assert.Equal(t, err, rErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for runtime to stop")
+	}
+}
+
+func stopRuntime(t *testing.T, rt *DaprRuntime) {
+	require.NoError(t, rt.runnerCloser.Close())
+}
+
+func TestComponentsCallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "OK")
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	port, _ := strconv.Atoi(u.Port())
+
+	c := make(chan struct{})
+	var callbackInvoked atomic.Bool
+
+	cfg := NewTestDaprRuntimeConfig(t, modes.StandaloneMode, "http", port)
+	rt, err := newDaprRuntime(t.Context(), testSecurity(t), cfg, &config.Configuration{}, &config.AccessControlList{}, resiliency.New(logger.NewLogger("test")))
+	require.NoError(t, err)
+	rt.runtimeConfig.registry = registry.New(registry.NewOptions().WithComponentsCallback(func(components registry.ComponentRegistry) error {
+		callbackInvoked.Store(true)
+		close(c)
+		return nil
+	}))
+
+	errCh := make(chan error)
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		errCh <- rt.Run(ctx)
+	}()
+
+	select {
+	case <-c:
+	case <-time.After(10 * time.Second):
+		assert.Fail(t, "timed out waiting for component callback")
+	}
+
+	assert.True(t, callbackInvoked.Load(), "component callback was not invoked")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for runtime to stop")
+	}
+}
+
+func TestGRPCProxy(t *testing.T) {
+	// setup gRPC server
+	serverPort, _ := freeport.GetFreePort()
+	teardown, err := runGRPCApp(serverPort)
+	require.NoError(t, err)
+	defer teardown()
+
+	// setup proxy
+	rt, err := NewTestDaprRuntimeWithProtocol(t, modes.StandaloneMode, "grpc", serverPort)
+	require.NoError(t, err)
+	internalPort, _ := freeport.GetFreePort()
+	rt.runtimeConfig.internalGRPCPort = internalPort
+
+	rt.runtimeConfig.registry.NameResolutions().RegisterComponent(
+		func(_ logger.Logger) nameresolution.Resolver {
+			mockResolver := new(daprt.MockResolver)
+			// proxy to server anytime
+			mockResolver.On("Init", mock.Anything).Return(nil)
+			mockResolver.On("ResolveID", mock.Anything).Return(fmt.Sprintf("localhost:%d", serverPort), nil)
+			return mockResolver
+		},
+		"mdns", // for standalone mode
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error)
+	go func() {
+		errCh <- rt.Run(ctx)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for runtime to stop")
+		}
 	})
 
-	t.Run("single output binding", func(t *testing.T) {
-		r := NewDaprRuntime(&Config{}, &config.Configuration{}, &config.AccessControlList{})
-		r.bindingsRegistry.RegisterOutputBindings(
-			bindings_loader.NewOutput("testOutputBinding", func() bindings.OutputBinding {
-				return &daprt.MockBinding{}
-			}),
-		)
+	req := &pb.PingRequest{Value: "foo"}
 
-		c := components_v1alpha1.Component{}
-		c.ObjectMeta.Name = "testOutputBinding"
-		c.Spec.Type = "bindings.testOutputBinding"
-		err := r.initBinding(c)
-		assert.NoError(t, err)
+	t.Run("proxy single streaming request", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second*5)
+		defer cancel()
+		stream, err := pingStreamClient(ctx, internalPort)
+		require.NoError(t, err)
+
+		require.NoError(t, stream.Send(req), "sending to PingStream must not fail")
+		resp, err := stream.Recv()
+		require.NoError(t, err)
+		require.NotNil(t, resp, "resp must not be nil")
+
+		require.NoError(t, stream.CloseSend(), "no error on close send")
 	})
 
-	t.Run("one input binding, one output binding", func(t *testing.T) {
-		r := NewDaprRuntime(&Config{}, &config.Configuration{}, &config.AccessControlList{})
-		r.bindingsRegistry.RegisterInputBindings(
-			bindings_loader.NewInput("testinput", func() bindings.InputBinding {
-				return &daprt.MockBinding{}
-			}),
-		)
+	t.Run("proxy concurrent streaming requests", func(t *testing.T) {
+		ctx1, cancel := context.WithTimeout(t.Context(), time.Second*5)
+		defer cancel()
+		stream1, err := pingStreamClient(ctx1, internalPort)
+		require.NoError(t, err)
 
-		r.bindingsRegistry.RegisterOutputBindings(
-			bindings_loader.NewOutput("testoutput", func() bindings.OutputBinding {
-				return &daprt.MockBinding{}
-			}),
-		)
+		ctx2, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		stream2, err := pingStreamClient(ctx2, internalPort)
+		require.NoError(t, err)
 
-		input := components_v1alpha1.Component{}
-		input.ObjectMeta.Name = "testinput"
-		input.Spec.Type = "bindings.testinput"
-		err := r.initBinding(input)
-		assert.NoError(t, err)
+		require.NoError(t, stream1.Send(req), "sending to PingStream must not fail")
+		resp, err := stream1.Recv()
+		require.NoError(t, err)
+		require.NotNil(t, resp, "resp must not be nil")
 
-		output := components_v1alpha1.Component{}
-		output.ObjectMeta.Name = "testinput"
-		output.Spec.Type = "bindings.testoutput"
-		err = r.initBinding(output)
-		assert.NoError(t, err)
+		require.NoError(t, stream2.Send(req), "sending to PingStream must not fail")
+		resp, err = stream2.Recv()
+		require.NoError(t, err)
+		require.NotNil(t, resp, "resp must not be nil")
+
+		require.NoError(t, stream1.CloseSend(), "no error on close send")
+		require.NoError(t, stream2.CloseSend(), "no error on close send")
 	})
+}
+
+func TestShutdownWithWait(t *testing.T) {
+	t.Run("calling ShutdownWithWait should wait until runtime has stopped", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		closeSecretClose := make(chan struct{})
+		closeSecretCalled := make(chan struct{})
+		m := rtmock.NewMockKubernetesStoreWithClose(func() error {
+			close(closeSecretCalled)
+			<-closeSecretClose
+			return nil
+		})
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			"kubernetesMock",
+		)
+		rt.wfengine = wfenginefake.New()
+
+		dir := t.TempDir()
+		rt.runtimeConfig.standalone.ResourcesPath = []string{dir}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "kubernetesMock.yaml"), []byte(`
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kubernetesMock
+spec:
+  type: secretstores.kubernetesMock
+  version: v1
+`), 0o600))
+
+		// Use a background context since this is not closed by the test.
+		ctx := t.Context()
+		errCh := make(chan error)
+		go func() {
+			errCh <- rt.Run(ctx)
+		}()
+
+		assert.Eventually(t, func() bool {
+			return len(rt.compStore.ListComponents()) > 0
+		}, 5*time.Second, 100*time.Millisecond, "timed out waiting for component store to be populated with mock secret")
+
+		shutdownCh := make(chan struct{})
+		go func() {
+			rt.ShutdownWithWait()
+			close(shutdownCh)
+		}()
+
+		select {
+		case <-closeSecretCalled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for secret store to be closed")
+		}
+
+		select {
+		case <-errCh:
+			t.Fatal("runtime stopped before ShutdownWithWait returned")
+		default:
+		}
+
+		select {
+		case <-shutdownCh:
+			t.Fatal("ShutdownWithWait returned before runtime stopped")
+		default:
+			close(closeSecretClose)
+		}
+
+		select {
+		case <-shutdownCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for ShutdownWithWait to return")
+		}
+
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for runtime to stop")
+		}
+	})
+
+	t.Run("if secret times out after init, error should return from runtime and ShutdownWithWait should return", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		initSecretContextClosed := make(chan struct{})
+		closeSecretInit := make(chan struct{})
+		m := rtmock.NewMockKubernetesStoreWithInitCallback(func(ctx context.Context) error {
+			<-ctx.Done()
+			close(initSecretContextClosed)
+			<-closeSecretInit
+			return nil
+		})
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			"kubernetesMock",
+		)
+		dir := t.TempDir()
+		rt.runtimeConfig.standalone.ResourcesPath = []string{dir}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "kubernetesMock.yaml"), []byte(`
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+ name: kubernetesMock
+spec:
+  type: secretstores.kubernetesMock
+  version: v1
+  initTimeout: 1ms
+`), 0o600))
+
+		// Use a background context since this is not closed by the test.
+		ctx := t.Context()
+		errCh := make(chan error)
+		go func() {
+			errCh <- rt.Run(ctx)
+		}()
+
+		select {
+		case <-initSecretContextClosed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for secret store to return inited because of timeout")
+		}
+
+		select {
+		case <-errCh:
+			t.Fatal("runtime returned stopped before secret Close() returned")
+		default:
+		}
+
+		shutdownCh := make(chan struct{})
+		go func() {
+			rt.ShutdownWithWait()
+			close(shutdownCh)
+		}()
+
+		close(closeSecretInit)
+
+		select {
+		case <-shutdownCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for ShutdownWithWait to return")
+		}
+
+		select {
+		case err := <-errCh:
+			require.Error(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for runtime to stop")
+		}
+
+		select {
+		case <-shutdownCh:
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for runtime to be marked as stopped")
+		}
+	})
+
+	t.Run("if secret init fails then the runtime should not error when the error should be ignored. Should wait for shutdown signal", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		secretInited := make(chan struct{})
+		m := rtmock.NewMockKubernetesStoreWithInitCallback(func(ctx context.Context) error {
+			close(secretInited)
+			return errors.New("this is an error")
+		})
+
+		secretClosed := make(chan struct{})
+		m.(*rtmock.MockKubernetesStateStore).CloseFn = func() error {
+			close(secretClosed)
+			return nil
+		}
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			"kubernetesMock",
+		)
+		rt.wfengine = wfenginefake.New()
+
+		dir := t.TempDir()
+		rt.runtimeConfig.standalone.ResourcesPath = []string{dir}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "kubernetesMock.yaml"), []byte(`
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kubernetesMock
+spec:
+  type: secretstores.kubernetesMock
+  version: v1
+  ignoreErrors: true
+`), 0o600))
+
+		// Use a background context since this is not closed by the test.
+		ctx := t.Context()
+		errCh := make(chan error)
+		go func() {
+			errCh <- rt.Run(ctx)
+		}()
+
+		select {
+		case <-secretInited:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for secret store to be inited")
+		}
+
+		shutdownCh := make(chan struct{})
+		go func() {
+			rt.ShutdownWithWait()
+			close(shutdownCh)
+		}()
+
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for runtime to stop")
+		}
+
+		select {
+		case <-shutdownCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for ShutdownWithWait to return")
+		}
+
+		select {
+		case <-secretClosed:
+			t.Fatal("secret store closed should not be called when init failed")
+		default:
+		}
+	})
+	t.Run("if secret init fails then the runtime should error when the error should NOT be ignored. Shouldn't wait for shutdown signal", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		m := rtmock.NewMockKubernetesStoreWithInitCallback(func(ctx context.Context) error {
+			return errors.New("this is an error")
+		})
+
+		secretClosed := make(chan struct{})
+		m.(*rtmock.MockKubernetesStateStore).CloseFn = func() error {
+			close(secretClosed)
+			return nil
+		}
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			"kubernetesMock",
+		)
+
+		dir := t.TempDir()
+		rt.runtimeConfig.standalone.ResourcesPath = []string{dir}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "kubernetesMock.yaml"), []byte(`
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kubernetesMock
+spec:
+  type: secretstores.kubernetesMock
+  version: v1
+`), 0o600))
+
+		// Use a background context since this is not closed by the test.
+		ctx := t.Context()
+		errCh := make(chan error)
+		go func() {
+			errCh <- rt.Run(ctx)
+		}()
+
+		select {
+		case err := <-errCh:
+			require.ErrorContains(t, err, "this is an error")
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for runtime to error")
+		}
+
+		select {
+		case <-secretClosed:
+			t.Fatal("secret store should not be closed when init failed")
+		default:
+		}
+
+		// ShutdownWithWait() can still be called even if the runtime errored, it
+		// will just return immediately.
+		shutdownCh := make(chan struct{})
+		go func() {
+			rt.ShutdownWithWait()
+			close(shutdownCh)
+		}()
+
+		select {
+		case <-shutdownCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for ShutdownWithWait to return")
+		}
+	})
+
+	t.Run("runtime should fatal if closing components does not happen in time", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		m := rtmock.NewMockKubernetesStoreWithClose(func() error {
+			<-time.After(5 * time.Second)
+			return nil
+		})
+		rt.runtimeConfig.gracefulShutdownDuration = time.Millisecond * 10
+
+		fatalShutdownCalled := make(chan struct{})
+		rt.runnerCloser.WithFatalShutdown(func() {
+			close(fatalShutdownCalled)
+		})
+
+		rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+			func(_ logger.Logger) secretstores.SecretStore {
+				return m
+			},
+			"kubernetesMock",
+		)
+
+		dir := t.TempDir()
+		rt.runtimeConfig.standalone.ResourcesPath = []string{dir}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "kubernetesMock.yaml"), []byte(`
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kubernetesMock
+spec:
+  type: secretstores.kubernetesMock
+  version: v1
+`), 0o600))
+
+		// Use a background context since this is not closed by the test.
+		ctx := t.Context()
+		errCh := make(chan error)
+		go func() {
+			errCh <- rt.Run(ctx)
+		}()
+
+		assert.Eventually(t, func() bool {
+			return len(rt.compStore.ListSecretStores()) > 0
+		}, 5*time.Second, 100*time.Millisecond, "secret store not init in time")
+
+		go rt.ShutdownWithWait()
+
+		select {
+		case <-fatalShutdownCalled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for fatal shutdown to return")
+		}
+	})
+}
+
+func TestGetComponentsCapabilitiesMap(t *testing.T) {
+	rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+	require.NoError(t, err)
+	defer stopRuntime(t, rt)
+
+	mockStateStore := new(daprt.MockStateStore)
+	rt.runtimeConfig.registry.StateStores().RegisterComponent(
+		func(_ logger.Logger) state.Store {
+			return mockStateStore
+		},
+		"mockState",
+	)
+	mockStateStore.On("Init", mock.Anything).Return(nil)
+	cStateStore := componentsV1alpha1.Component{}
+	cStateStore.ObjectMeta.Name = "testStateStoreName"
+	cStateStore.Spec.Type = "state.mockState"
+
+	mockPubSub := new(daprt.MockPubSub)
+	rt.runtimeConfig.registry.PubSubs().RegisterComponent(
+		func(_ logger.Logger) pubsub.PubSub {
+			return mockPubSub
+		},
+		"mockPubSub",
+	)
+	mockPubSub.On("Init", mock.Anything).Return(nil)
+	mockPubSub.On("Features").Return([]pubsub.Feature{pubsub.FeatureMessageTTL, pubsub.FeatureSubscribeWildcards})
+	cPubSub := componentsV1alpha1.Component{}
+	cPubSub.ObjectMeta.Name = "mockPubSub"
+	cPubSub.Spec.Type = "pubsub.mockPubSub"
+
+	rt.runtimeConfig.registry.Bindings().RegisterInputBinding(
+		func(_ logger.Logger) bindings.InputBinding {
+			return &daprt.MockBinding{}
+		},
+		"testInputBinding",
+	)
+	cin := componentsV1alpha1.Component{}
+	cin.ObjectMeta.Name = "testInputBinding"
+	cin.Spec.Type = "bindings.testInputBinding"
+
+	rt.runtimeConfig.registry.Bindings().RegisterOutputBinding(
+		func(_ logger.Logger) bindings.OutputBinding {
+			return &daprt.MockBinding{}
+		},
+		"testOutputBinding",
+	)
+	cout := componentsV1alpha1.Component{}
+	cout.ObjectMeta.Name = "testOutputBinding"
+	cout.Spec.Type = "bindings.testOutputBinding"
+
+	mockSecretStoreName := "mockSecretStore"
+	mockSecretStore := new(daprt.FakeSecretStore)
+	rt.runtimeConfig.registry.SecretStores().RegisterComponent(
+		func(_ logger.Logger) secretstores.SecretStore {
+			return mockSecretStore
+		},
+		mockSecretStoreName,
+	)
+	cSecretStore := componentsV1alpha1.Component{}
+	cSecretStore.ObjectMeta.Name = mockSecretStoreName
+	cSecretStore.Spec.Type = "secretstores.mockSecretStore"
+
+	require.NoError(t, rt.processor.Init(t.Context(), cin))
+	require.NoError(t, rt.processor.Init(t.Context(), cout))
+	require.NoError(t, rt.processor.Init(t.Context(), cPubSub))
+	require.NoError(t, rt.processor.Init(t.Context(), cStateStore))
+	require.NoError(t, rt.processor.Init(t.Context(), cSecretStore))
+
+	capabilities := rt.getComponentsCapabilitesMap()
+	assert.Len(t, capabilities, 5,
+		"All 5 registered components have are present in capabilities (stateStore pubSub input output secretStore)")
+	assert.Len(t, capabilities["mockPubSub"], 2,
+		"mockPubSub has 2 features because we mocked it so")
+	assert.Len(t, capabilities["testInputBinding"], 1,
+		"Input bindings always have INPUT_BINDING added to their capabilities")
+	assert.Len(t, capabilities["testOutputBinding"], 1,
+		"Output bindings always have OUTPUT_BINDING added to their capabilities")
+	assert.Len(t, capabilities[mockSecretStoreName], 1,
+		"mockSecretStore has a single feature and it should be present")
+}
+
+func runGRPCApp(port int) (func(), error) {
+	serverListener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return func() {}, err
+	}
+
+	server := grpc.NewServer()
+	pb.RegisterTestServiceServer(server, &pingStreamService{})
+	go func() {
+		server.Serve(serverListener)
+	}()
+	teardown := func() {
+		server.Stop()
+	}
+
+	return teardown, nil
+}
+
+func pingStreamClient(ctx context.Context, port int) (pb.TestService_PingStreamClient, error) {
+	//nolint:staticcheck
+	clientConn, err := grpc.DialContext(
+		ctx,
+		fmt.Sprintf("localhost:%d", port),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	testClient := pb.NewTestServiceClient(clientConn)
+
+	ctx = metadata.AppendToOutgoingContext(ctx, "dapr-app-id", "dummy")
+	return testClient.PingStream(ctx)
+}
+
+type pingStreamService struct {
+	pb.TestServiceServer
+}
+
+func (s *pingStreamService) PingStream(stream pb.TestService_PingStreamServer) error {
+	counter := int32(0)
+	for {
+		ping, err := stream.Recv()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		}
+		pong := &pb.PingResponse{Value: ping.GetValue(), Counter: counter}
+		if err := stream.Send(pong); err != nil {
+			return err
+		}
+		counter++
+	}
+	return nil
+}
+
+func matchDaprRequestMethod(method string) any {
+	return mock.MatchedBy(func(req *invokev1.InvokeMethodRequest) bool {
+		if req == nil || req.Message() == nil || req.Message().GetMethod() != method {
+			return false
+		}
+		return true
+	})
+}
+
+func TestGracefulShutdownBindings(t *testing.T) {
+	rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error)
+	go func() {
+		errCh <- rt.Run(ctx)
+	}()
+
+	rt.runtimeConfig.gracefulShutdownDuration = 3 * time.Second
+	rt.runtimeConfig.registry.Bindings().RegisterInputBinding(
+		func(_ logger.Logger) bindings.InputBinding {
+			return &daprt.MockBinding{}
+		},
+		"testInputBinding",
+	)
+	cin := componentsV1alpha1.Component{}
+	cin.ObjectMeta.Name = "testInputBinding"
+	cin.Spec.Type = "bindings.testInputBinding"
+
+	rt.runtimeConfig.registry.Bindings().RegisterOutputBinding(
+		func(_ logger.Logger) bindings.OutputBinding {
+			return &daprt.MockBinding{}
+		},
+		"testOutputBinding",
+	)
+	cout := componentsV1alpha1.Component{}
+	cout.ObjectMeta.Name = "testOutputBinding"
+	cout.Spec.Type = "bindings.testOutputBinding"
+	require.NoError(t, rt.processor.Init(t.Context(), cin))
+	require.NoError(t, rt.processor.Init(t.Context(), cout))
+	assert.Len(t, rt.compStore.ListInputBindings(), 1)
+	assert.Len(t, rt.compStore.ListOutputBindings(), 1)
+
+	cancel()
+	select {
+	case <-time.After(rt.runtimeConfig.gracefulShutdownDuration + 2*time.Second):
+		assert.Fail(t, "input bindings shutdown timed out")
+	case err := <-errCh:
+		require.NoError(t, err)
+	}
+}
+
+func TestBlockShutdownBindings(t *testing.T) {
+	t.Run("block timeout", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		fakeClock := clocktesting.NewFakeClock(time.Now())
+		rt.clock = fakeClock
+		rt.appHealthChanged(t.Context(), apphealth.NewStatus(true, nil))
+
+		rt.runtimeConfig.blockShutdownDuration = ptr.Of(time.Millisecond * 100)
+		rt.runtimeConfig.gracefulShutdownDuration = 3 * time.Second
+
+		ctx, cancel := context.WithCancel(t.Context())
+		errCh := make(chan error)
+		go func() {
+			errCh <- rt.Run(ctx)
+		}()
+
+		cancel()
+
+		select {
+		case <-time.After(time.Second):
+		case <-errCh:
+			assert.Fail(t, "expected not to return until block timeout is reached")
+		}
+
+		fakeClock.Step(time.Millisecond * 200)
+
+		select {
+		case <-time.After(rt.runtimeConfig.gracefulShutdownDuration + 2*time.Second):
+			assert.Fail(t, "input bindings shutdown timed out")
+		case err := <-errCh:
+			require.NoError(t, err)
+		}
+	})
+
+	t.Run("block app unhealthy", func(t *testing.T) {
+		rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+		require.NoError(t, err)
+
+		fakeClock := clocktesting.NewFakeClock(time.Now())
+		rt.clock = fakeClock
+		rt.appHealthChanged(t.Context(), apphealth.NewStatus(true, nil))
+
+		rt.runtimeConfig.blockShutdownDuration = ptr.Of(time.Millisecond * 100)
+		rt.runtimeConfig.gracefulShutdownDuration = 3 * time.Second
+
+		ctx, cancel := context.WithCancel(t.Context())
+		errCh := make(chan error)
+		go func() {
+			errCh <- rt.Run(ctx)
+		}()
+
+		cancel()
+
+		select {
+		case <-time.After(time.Second):
+		case <-errCh:
+			assert.Fail(t, "expected not to return until block timeout is reached")
+		}
+
+		rt.appHealthChanged(t.Context(), apphealth.NewStatus(false, nil))
+
+		select {
+		case <-time.After(rt.runtimeConfig.gracefulShutdownDuration + 2*time.Second):
+			assert.Fail(t, "input bindings shutdown timed out")
+		case err := <-errCh:
+			require.NoError(t, err)
+		}
+	})
+}
+
+func TestGracefulShutdownPubSub(t *testing.T) {
+	rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+	require.NoError(t, err)
+	mockPubSub := new(daprt.MockPubSub)
+	rt.runtimeConfig.registry.PubSubs().RegisterComponent(
+		func(_ logger.Logger) pubsub.PubSub {
+			return mockPubSub
+		},
+		"mockPubSub",
+	)
+	rt.runtimeConfig.gracefulShutdownDuration = 5 * time.Second
+	mockPubSub.On("Init", mock.Anything).Return(nil)
+	mockPubSub.On("Subscribe", mock.AnythingOfType("pubsub.SubscribeRequest"), mock.AnythingOfType("pubsub.Handler")).Return(nil)
+	mockPubSub.On("Close").Return(nil)
+
+	cPubSub := componentsV1alpha1.Component{}
+	cPubSub.ObjectMeta.Name = "mockPubSub"
+	cPubSub.Spec.Type = "pubsub.mockPubSub"
+
+	subscriptionItems := []runtimePubsub.SubscriptionJSON{
+		{PubsubName: "mockPubSub", Topic: "topic0", Route: "shutdown"},
+	}
+	sub, _ := json.Marshal(subscriptionItems)
+	fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
+	fakeResp.WithRawDataBytes(sub).
+		WithContentType("application/json")
+	defer fakeResp.Close()
+
+	mockAppChannel := new(channelt.MockAppChannel)
+	rt.channels.WithAppChannel(mockAppChannel)
+	mockAppChannel.On("InvokeMethod", mock.MatchedBy(daprt.MatchContextInterface), matchDaprRequestMethod("dapr/subscribe")).Return(fakeResp, nil)
+	// Create new processor with mocked app channel.
+	rt.processor = processor.New(processor.Options{
+		ID:             rt.runtimeConfig.id,
+		IsHTTP:         rt.runtimeConfig.appConnectionConfig.Protocol.IsHTTP(),
+		ActorsEnabled:  len(rt.runtimeConfig.actorsService) > 0,
+		Registry:       rt.runtimeConfig.registry,
+		ComponentStore: rt.compStore,
+		Meta:           rt.meta,
+		GlobalConfig:   rt.globalConfig,
+		Resiliency:     rt.resiliency,
+		Mode:           rt.runtimeConfig.mode,
+		Channels:       rt.channels,
+		GRPC:           rt.grpc,
+		Security:       rt.sec,
+	})
+
+	require.NoError(t, rt.processor.Init(t.Context(), cPubSub))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error)
+	go func() {
+		errCh <- rt.Run(ctx)
+	}()
+
+	rt.appHealthChanged(t.Context(), apphealth.NewStatus(true, nil))
+
+	mockPubSub.AssertCalled(t, "Init", mock.Anything)
+	mockPubSub.AssertCalled(t, "Subscribe", mock.AnythingOfType("pubsub.SubscribeRequest"), mock.AnythingOfType("pubsub.Handler"))
+
+	cancel()
+	select {
+	case <-time.After(rt.runtimeConfig.gracefulShutdownDuration + 2*time.Second):
+		assert.Fail(t, "pubsub shutdown timed out")
+	case err := <-errCh:
+		require.NoError(t, err)
+	}
+}
+
+func TestGracefulShutdownActors(t *testing.T) {
+	rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+	require.NoError(t, err)
+	rt.runtimeConfig.gracefulShutdownDuration = 5 * time.Second
+
+	bytes := make([]byte, 32)
+	rand.Read(bytes)
+	encryptKey := hex.EncodeToString(bytes)
+
+	mockStateComponent := componentsV1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: TestPubsubName,
+		},
+		Spec: componentsV1alpha1.ComponentSpec{
+			Type:    "state.mockState",
+			Version: "v1",
+			Metadata: []commonapi.NameValuePair{
+				{
+					Name: "ACTORSTATESTORE",
+					Value: commonapi.DynamicValue{
+						JSON: v1.JSON{Raw: []byte("true")},
+					},
+				},
+				{
+					Name: "primaryEncryptionKey",
+					Value: commonapi.DynamicValue{
+						JSON: v1.JSON{Raw: []byte(encryptKey)},
+					},
+				},
+			},
+		},
+		Auth: componentsV1alpha1.Auth{
+			SecretStore: "mockSecretStore",
+		},
+	}
+
+	// setup
+	initMockStateStoreForRuntime(rt, encryptKey, nil)
+
+	rt.namespace = "test"
+	rt.runtimeConfig.appConnectionConfig.Port = -1
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error)
+	go func() {
+		errCh <- rt.Run(ctx)
+	}()
+
+	select {
+	case <-rt.initComplete:
+	case <-time.After(time.Second * 5):
+		t.Fatal("runtime did not init in time")
+	}
+
+	// act
+	err = rt.processor.Init(t.Context(), mockStateComponent)
+
+	// assert
+	require.NoError(t, err, "expected no error")
+
+	cancel()
+
+	select {
+	case <-time.After(rt.runtimeConfig.gracefulShutdownDuration + 2*time.Second):
+		assert.Fail(t, "actors shutdown timed out")
+	case err := <-errCh:
+		require.NoError(t, err)
+	}
+
+	var activeActCount int32
+	runtimeStatus := rt.actors.RuntimeStatus()
+	for _, v := range runtimeStatus.GetActiveActors() {
+		activeActCount += v.GetCount()
+	}
+	assert.Equal(t, int32(0), activeActCount)
+}
+
+func initMockStateStoreForRuntime(rt *DaprRuntime, encryptKey string, e error) *daprt.MockStateStore {
+	mockStateStore := new(daprt.MockStateStore)
+
+	rt.runtimeConfig.registry.StateStores().RegisterComponent(
+		func(_ logger.Logger) state.Store {
+			return mockStateStore
+		},
+		"mockState",
+	)
+
+	expectedMetadata := state.Metadata{Base: mdata.Base{
+		Name: TestPubsubName,
+		Properties: map[string]string{
+			"actorstatestore":      "true",
+			"primaryEncryptionKey": encryptKey,
+		},
+	}}
+	expectedMetadataUppercase := state.Metadata{Base: mdata.Base{
+		Name: TestPubsubName,
+		Properties: map[string]string{
+			"ACTORSTATESTORE":      "true",
+			"primaryEncryptionKey": encryptKey,
+		},
+	}}
+
+	mockStateStore.On("Init", expectedMetadata).Return(e)
+	mockStateStore.On("Init", expectedMetadataUppercase).Return(e)
+
+	return mockStateStore
+}
+
+func TestTraceShutdown(t *testing.T) {
+	rt, err := NewTestDaprRuntime(t, modes.StandaloneMode)
+	require.NoError(t, err)
+	rt.runtimeConfig.gracefulShutdownDuration = 5 * time.Second
+	rt.globalConfig.Spec.TracingSpec = &config.TracingSpec{
+		Otel: &config.OtelSpec{
+			EndpointAddress: "foo.bar",
+			IsSecure:        ptr.Of(false),
+			Protocol:        "http",
+		},
+	}
+	rt.hostAddress = "localhost:3000"
+	tpStore := newOpentelemetryTracerProviderStore()
+	require.NoError(t, rt.setupTracing(t.Context(), rt.hostAddress, tpStore))
+	assert.NotNil(t, rt.tracerProvider)
+
+	errCh := make(chan error)
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		errCh <- rt.Run(ctx)
+	}()
+
+	cancel()
+
+	select {
+	case <-time.After(rt.runtimeConfig.gracefulShutdownDuration + 2*time.Second):
+		assert.Fail(t, "tracing shutdown timed out")
+	case err := <-errCh:
+		require.NoError(t, err)
+	}
+
+	assert.Nil(t, rt.tracerProvider)
+}
+
+func testSecurity(t *testing.T) security.Handler {
+	secP, err := security.New(t.Context(), security.Options{
+		TrustAnchors:            []byte("test"),
+		AppID:                   "test",
+		ControlPlaneTrustDomain: "test.example.com",
+		ControlPlaneNamespace:   "default",
+		MTLSEnabled:             false,
+		OverrideCertRequestFn: func(context.Context, []byte) (*spiffe.SVIDResponse, error) {
+			return nil, nil
+		},
+		Healthz: healthz.New(),
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go secP.Run(ctx)
+	sec, err := secP.Handler(t.Context())
+	require.NoError(t, err)
+
+	return sec
+}
+
+func TestOtelResourceDetection(t *testing.T) {
+	tests := []struct {
+		name                string
+		otelServiceName     string
+		otelResourceAttrs   string
+		fallbackAppID       string
+		expectedServiceName string
+		expectedAttrs       map[string]string
+	}{
+		{
+			name:                "No environment variable, use fallback app ID",
+			otelServiceName:     "",
+			otelResourceAttrs:   "",
+			fallbackAppID:       "my-app",
+			expectedServiceName: "my-app",
+			expectedAttrs:       map[string]string{},
+		},
+		{
+			name:                "OTEL_SERVICE_NAME set, use it instead of fallback",
+			otelServiceName:     "service-abc",
+			otelResourceAttrs:   "",
+			fallbackAppID:       "my-app",
+			expectedServiceName: "service-abc",
+			expectedAttrs:       map[string]string{},
+		},
+		{
+			name:                "OTEL_RESOURCE_ATTRIBUTES with k8s attributes",
+			otelServiceName:     "",
+			otelResourceAttrs:   "k8s.pod.uid=123-456-789,k8s.namespace.name=default,k8s.pod.name=my-pod",
+			fallbackAppID:       "my-app",
+			expectedServiceName: "my-app",
+			expectedAttrs: map[string]string{
+				"k8s.pod.uid":        "123-456-789",
+				"k8s.namespace.name": "default",
+				"k8s.pod.name":       "my-pod",
+			},
+		},
+		{
+			name:                "OTEL_SERVICE_NAME takes precedence over service.name in OTEL_RESOURCE_ATTRIBUTES",
+			otelServiceName:     "service-from-env",
+			otelResourceAttrs:   "service.name=service-from-attrs,k8s.pod.name=my-pod",
+			fallbackAppID:       "my-app",
+			expectedServiceName: "service-from-env",
+			expectedAttrs: map[string]string{
+				"k8s.pod.name": "my-pod",
+			},
+		},
+		{
+			name:                "Both OTEL vars set with k8s attributes",
+			otelServiceName:     "my-dapr-sidecar",
+			otelResourceAttrs:   "k8s.pod.uid=abc-def,k8s.deployment.name=my-app,k8s.namespace.name=production",
+			fallbackAppID:       "fallback-id",
+			expectedServiceName: "my-dapr-sidecar",
+			expectedAttrs: map[string]string{
+				"k8s.pod.uid":         "abc-def",
+				"k8s.deployment.name": "my-app",
+				"k8s.namespace.name":  "production",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Set environment variables
+			t.Setenv("OTEL_SERVICE_NAME", tc.otelServiceName)
+			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tc.otelResourceAttrs)
+
+			ctx := t.Context()
+			r := createOtelResource(ctx, tc.fallbackAppID)
+
+			// Convert attributes to map for easier assertions
+			attrs := r.Attributes()
+			attrMap := make(map[string]string)
+			for _, attr := range attrs {
+				attrMap[string(attr.Key)] = attr.Value.AsString()
+			}
+
+			// Verify service.name attribute
+			serviceName, exists := attrMap["service.name"]
+			require.True(t, exists, "service.name attribute should exist")
+			assert.Equal(t, tc.expectedServiceName, serviceName,
+				"service.name should be %s, but got %s", tc.expectedServiceName, serviceName)
+
+			// Verify additional expected attributes
+			for key, expectedValue := range tc.expectedAttrs {
+				value, exists := attrMap[key]
+				assert.True(t, exists, "Expected attribute %s to exist", key)
+				if exists {
+					assert.Equal(t, expectedValue, value,
+						"Attribute %s should be %s, but got %s", key, expectedValue, value)
+				}
+			}
+		})
+	}
 }

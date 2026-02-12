@@ -1,7 +1,15 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package raft
 
@@ -11,6 +19,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type MockSnapShotSink struct {
@@ -33,11 +42,16 @@ func (m *MockSnapShotSink) Close() error {
 
 func TestPersist(t *testing.T) {
 	// arrange
-	fsm := newFSM()
+	fsm := newFSM(DaprHostMemberStateConfig{
+		replicationFactor: 10,
+		minAPILevel:       0,
+		maxAPILevel:       100,
+	})
 	testMember := DaprHostMember{
-		Name:     "127.0.0.1:3030",
-		AppID:    "fakeAppID",
-		Entities: []string{"actorTypeOne", "actorTypeTwo"},
+		Name:      "127.0.0.1:3030",
+		Namespace: "ns1",
+		AppID:     "fakeAppID",
+		Entities:  []string{"actorTypeOne", "actorTypeTwo"},
 	}
 	cmdLog, _ := makeRaftLogCommand(MemberUpsert, testMember)
 	raftLog := &raft.Log{
@@ -52,17 +66,26 @@ func TestPersist(t *testing.T) {
 
 	// act
 	snap, err := fsm.Snapshot()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	snap.Persist(fakeSink)
 
 	// assert
-	restoredState := &DaprHostMemberState{}
-	err = unmarshalMsgPack(buf.Bytes(), restoredState)
-	assert.NoError(t, err)
+	restoredState := newDaprHostMemberState(DaprHostMemberStateConfig{
+		replicationFactor: 10,
+		minAPILevel:       0,
+		maxAPILevel:       100,
+	})
+	err = restoredState.restore(buf)
+	require.NoError(t, err)
 
-	expectedMember := fsm.State().Members[testMember.Name]
-	restoredMember := restoredState.Members[testMember.Name]
-	assert.Equal(t, fsm.State().Index, restoredState.Index)
+	members, err := fsm.State().members("ns1")
+	require.NoError(t, err)
+	expectedMember := members[testMember.Name]
+
+	restoredMembers, err := restoredState.members("ns1")
+	require.NoError(t, err)
+	restoredMember := restoredMembers[testMember.Name]
+	assert.Equal(t, fsm.State().Index(), restoredState.Index())
 	assert.Equal(t, expectedMember.Name, restoredMember.Name)
 	assert.Equal(t, expectedMember.AppID, restoredMember.AppID)
 	assert.EqualValues(t, expectedMember.Entities, restoredMember.Entities)

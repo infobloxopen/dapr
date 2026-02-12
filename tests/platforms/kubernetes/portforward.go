@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -16,7 +17,7 @@ import (
 	"k8s.io/client-go/transport/spdy"
 )
 
-// PodPortFowarder implements the PortForwarder interface for Kubernetes
+// PodPortFowarder implements the PortForwarder interface for Kubernetes.
 type PodPortForwarder struct {
 	// Kubernetes client
 	client *KubeClient
@@ -28,7 +29,7 @@ type PodPortForwarder struct {
 	readyChannel chan struct{}
 }
 
-// PortForwardRequest encapsulates data required to establish a Kuberentes tunnel
+// PortForwardRequest encapsulates data required to establish a Kubernetes tunnel.
 type PortForwardRequest struct {
 	// restConfig is the kubernetes config
 	restConfig *rest.Config
@@ -46,7 +47,7 @@ type PortForwardRequest struct {
 	readyChannel chan struct{}
 }
 
-// NewPodPortForwarder returns a new PodPortForwarder
+// NewPodPortForwarder returns a new PodPortForwarder.
 func NewPodPortForwarder(c *KubeClient, namespace string) *PodPortForwarder {
 	return &PodPortForwarder{
 		client:       c,
@@ -56,25 +57,25 @@ func NewPodPortForwarder(c *KubeClient, namespace string) *PodPortForwarder {
 	}
 }
 
-// Connect establishes a new connection to a given app on the provided target ports
+// Connect establishes a new connection to a given app on the provided target ports.
 func (p *PodPortForwarder) Connect(name string, targetPorts ...int) ([]int, error) {
 	if name == "" {
-		return nil, fmt.Errorf("name must be set to establish connection")
+		return nil, errors.New("name must be set to establish connection")
 	}
 	if len(targetPorts) == 0 {
-		return nil, fmt.Errorf("cannot establish connection without target ports")
+		return nil, errors.New("cannot establish connection without target ports")
 	}
 	if p.namespace == "" {
-		return nil, fmt.Errorf("namespace must be set to establish connection")
+		return nil, errors.New("namespace must be set to establish connection")
 	}
 	if p.client == nil {
-		return nil, fmt.Errorf("client must be set to establish connection")
+		return nil, errors.New("client must be set to establish connection")
 	}
 
 	config := p.client.GetClientConfig()
 
-	var ports []int
-	for i := 0; i < len(targetPorts); i++ {
+	ports := make([]int, 0, len(targetPorts))
+	for range targetPorts {
 		p, perr := freeport.GetFreePort()
 		if perr != nil {
 			return nil, perr
@@ -102,7 +103,6 @@ func (p *PodPortForwarder) Connect(name string, targetPorts ...int) ([]int, erro
 		stopChannel:  p.stopChannel,
 		readyChannel: p.readyChannel,
 	})
-
 	if err != nil {
 		return nil, err
 	}

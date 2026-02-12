@@ -1,15 +1,19 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package main
 
 import (
-	actor_cl "actorload/pkg/actor/client"
-	cl "actorload/pkg/actor/client"
-	http_client "actorload/pkg/actor/client/http"
-
 	"errors"
 	"flag"
 	"fmt"
@@ -23,7 +27,9 @@ import (
 	"fortio.org/fortio/stats"
 	"github.com/google/uuid"
 
-	telemetry "actorload/pkg/telemetry"
+	actorClient "github.com/dapr/dapr/tests/apps/actorload/pkg/actor/client"
+	httpClient "github.com/dapr/dapr/tests/apps/actorload/pkg/actor/client/http"
+	telemetry "github.com/dapr/dapr/tests/apps/actorload/pkg/telemetry"
 )
 
 const (
@@ -36,7 +42,7 @@ const (
 type actorLoadTestRunnable struct {
 	periodic.RunnerResults
 
-	client            cl.ActorClient
+	client            actorClient.ActorClient
 	currentActorIndex int
 
 	payload []byte
@@ -70,7 +76,7 @@ func (lt *actorLoadTestRunnable) Run(t int) {
 		lt.testActorMethod,
 		"application/json", lt.payload)
 	if err != nil {
-		if actorErr, ok := err.(*http_client.DaprActorClientError); ok {
+		if actorErr, ok := err.(*httpClient.DaprActorClientError); ok {
 			code = actorErr.Code
 		} else {
 			code = 500
@@ -79,9 +85,9 @@ func (lt *actorLoadTestRunnable) Run(t int) {
 
 	log.Debugf("got, code: %3d, size: %d", code, size)
 
-	elasped := time.Since(start)
+	elapsed := time.Since(start)
 
-	lt.telemetryClient.RecordLoadRequestCount(lt.testActorType, actorID, elasped, code)
+	lt.telemetryClient.RecordLoadRequestCount(lt.testActorType, actorID, elapsed, code)
 
 	lt.RetCodes[code]++
 	lt.sizes.Record(float64(size))
@@ -104,7 +110,7 @@ type actorLoadTestOptions struct {
 }
 
 func generatePayload(length int) []byte {
-	var chs = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	chs := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
 	payload := make([]byte, length)
 	for i := range payload {
@@ -114,8 +120,8 @@ func generatePayload(length int) []byte {
 	return payload
 }
 
-func activateRandomActors(client actor_cl.ActorClient, actorType string, maxActor int) []string {
-	var activatedActors = []string{}
+func activateRandomActors(client actorClient.ActorClient, actorType string, maxActor int) []string {
+	activatedActors := []string{}
 	for i := 0; i < maxActor; i++ {
 		actorID := strings.Replace(uuid.New().String(), "-", "", -1)
 		log.Infof("Request to activate %s.%s actor", actorType, actorID)
@@ -135,7 +141,7 @@ func activateRandomActors(client actor_cl.ActorClient, actorType string, maxActo
 }
 
 func startLoadTest(opt *actorLoadTestOptions, telemetryClient *telemetry.TelemetryClient) (*actorLoadTestRunnable, error) {
-	client := http_client.NewClient()
+	client := httpClient.NewClient()
 	defer client.Close()
 
 	// Wait until Dapr runtime endpoint is available.
@@ -172,7 +178,7 @@ func startLoadTest(opt *actorLoadTestOptions, telemetryClient *telemetry.Telemet
 	// Set up parallel test threads.
 	for i := 0; i < opt.NumThreads; i++ {
 		r.Options().Runners[i] = &testRunnable[i]
-		testRunnable[i].client = http_client.NewClient()
+		testRunnable[i].client = httpClient.NewClient()
 		testRunnable[i].actors = activatedActors
 		testRunnable[i].testActorType = opt.TestActorType
 		testRunnable[i].testActorMethod = opt.ActorMethod

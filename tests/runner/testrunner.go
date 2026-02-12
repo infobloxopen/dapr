@@ -1,7 +1,15 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package runner
 
@@ -10,32 +18,46 @@ import (
 	"log"
 	"os"
 
+	corev1 "k8s.io/api/core/v1"
+
+	configurationv1alpha1 "github.com/dapr/dapr/pkg/apis/configuration/v1alpha1"
 	kube "github.com/dapr/dapr/tests/platforms/kubernetes"
 )
 
-// runnerFailExitCode is the exit code when test runner setup is failed
+// runnerFailExitCode is the exit code when test runner setup is failed.
 const runnerFailExitCode = 1
 
-// runnable is an interface to implement testing.M
+// runnable is an interface to implement testing.M.
 type runnable interface {
 	Run() int
 }
 
-// PlatformInterface defines the testing platform for test runner
-type PlatformInterface interface {
-	setup() error
-	tearDown() error
-	addComponents(comps []kube.ComponentDescription) error
-	addApps(apps []kube.AppDescription) error
+type LoadTester interface {
+	Run(platform PlatformInterface) error
+}
 
+// PlatformInterface defines the testing platform for test runner.
+//
+//nolint:interfacebloat
+type PlatformInterface interface {
+	Setup() error
+	TearDown() error
+
+	AddComponents(comps []kube.ComponentDescription) error
+	AddApps(apps []kube.AppDescription) error
+	AddSecrets(secrets []kube.SecretDescription) error
 	AcquireAppExternalURL(name string) string
 	GetAppHostDetails(name string) (string, string, error)
 	Restart(name string) error
 	Scale(name string, replicas int32) error
 	PortForwardToApp(appName string, targetPort ...int) ([]int, error)
+	SetAppEnv(appName, key, value string) error
 	GetAppUsage(appName string) (*AppUsage, error)
 	GetSidecarUsage(appName string) (*AppUsage, error)
 	GetTotalRestarts(appname string) (int, error)
+	GetConfiguration(name string) (*configurationv1alpha1.Configuration, error)
+	GetService(name string) (*corev1.Service, error)
+	LoadTest(loadtester LoadTester) error
 }
 
 // AppUsage holds the CPU and Memory information for the application.
@@ -45,7 +67,7 @@ type AppUsage struct {
 }
 
 // TestRunner holds initial test apps and testing platform instance
-// maintains apps and platform for e2e test
+// maintains apps and platform for e2e test.
 type TestRunner struct {
 	// id is test runner id which will be used for logging
 	id string
@@ -58,14 +80,18 @@ type TestRunner struct {
 	// TODO: Needs to define kube.AppDescription more general struct for Dapr app
 	testApps []kube.AppDescription
 
+	// secrets is the list of secrets to be created in the cluster
+	secrets []kube.SecretDescription
+
 	// Platform is the testing platform instances
 	Platform PlatformInterface
 }
 
-// NewTestRunner returns TestRunner instance for e2e test
+// NewTestRunner returns TestRunner instance for e2e test.
 func NewTestRunner(id string, apps []kube.AppDescription,
 	comps []kube.ComponentDescription,
-	initApps []kube.AppDescription) *TestRunner {
+	initApps []kube.AppDescription,
+) *TestRunner {
 	return &TestRunner{
 		id:         id,
 		components: comps,
@@ -75,26 +101,37 @@ func NewTestRunner(id string, apps []kube.AppDescription,
 	}
 }
 
-// Start is the entry point of Dapr test runner
+func (tr *TestRunner) AddSecrets(secrets []kube.SecretDescription) {
+	tr.secrets = secrets
+}
+
+// Start is the entry point of Dapr test runner.
 func (tr *TestRunner) Start(m runnable) int {
 	// TODO: Add logging and reporting initialization
 
 	// Setup testing platform
 	log.Println("Running setup...")
-	err := tr.Platform.setup()
+	err := tr.Platform.Setup()
 	defer func() {
 		log.Println("Running teardown...")
-		tr.tearDown()
+		tr.TearDown()
 	}()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed Platform.setup(), %s", err.Error())
 		return runnerFailExitCode
 	}
 
+	if tr.secrets != nil && len(tr.secrets) > 0 {
+		if err := tr.Platform.AddSecrets(tr.secrets); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed Platform.addSecrets(), %s", err.Error())
+			return runnerFailExitCode
+		}
+	}
+
 	// Install components.
 	if tr.components != nil && len(tr.components) > 0 {
 		log.Println("Installing components...")
-		if err := tr.Platform.addComponents(tr.components); err != nil {
+		if err := tr.Platform.AddComponents(tr.components); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed Platform.addComponents(), %s", err.Error())
 			return runnerFailExitCode
 		}
@@ -105,7 +142,7 @@ func (tr *TestRunner) Start(m runnable) int {
 	// other setup work.
 	if tr.initApps != nil && len(tr.initApps) > 0 {
 		log.Println("Installing init apps...")
-		if err := tr.Platform.addApps(tr.initApps); err != nil {
+		if err := tr.Platform.AddApps(tr.initApps); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed Platform.addInitApps(), %s", err.Error())
 			return runnerFailExitCode
 		}
@@ -114,7 +151,7 @@ func (tr *TestRunner) Start(m runnable) int {
 	// Install test apps. These are the main apps that provide the actual testing.
 	if tr.testApps != nil && len(tr.testApps) > 0 {
 		log.Println("Installing test apps...")
-		if err := tr.Platform.addApps(tr.testApps); err != nil {
+		if err := tr.Platform.AddApps(tr.testApps); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed Platform.addApps(), %s", err.Error())
 			return runnerFailExitCode
 		}
@@ -125,9 +162,9 @@ func (tr *TestRunner) Start(m runnable) int {
 	return m.Run()
 }
 
-func (tr *TestRunner) tearDown() {
+func (tr *TestRunner) TearDown() {
 	// Tearing down platform
-	tr.Platform.tearDown()
+	tr.Platform.TearDown()
 
 	// TODO: Add the resources which will be tearing down
 }

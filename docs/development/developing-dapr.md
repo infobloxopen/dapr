@@ -1,130 +1,101 @@
 # Developing Dapr
 
-This section will walk you through on how to clone and build the Dapr runtime.
-First, make sure you have [Go 1.15](https://golang.org/dl/) installed.
+## Setup Dapr development environment
 
+There are several options for getting an environment up and running for Dapr development:
 
-## Setup environment
+- Using [GitHub Codespaces](https://docs.dapr.io/contributing/codespaces/) pre-configured for Dapr development is often the quickest path to get started with a development environment for Dapr. ([Learn about Codespaces](https://github.com/features/codespaces))
+- If you are using [Visual Studio Code](https://code.visualstudio.com/), you can [connect to a development container](./setup-dapr-development-using-vscode.md) configured for Dapr development.
+- [Manually install](./setup-dapr-development-env.md) the necessary tools and frameworks for developing Dapr on your device.
 
-This document helps you get started developing Dapr. If you find any problem while following this guide, please create a Pull Request to update this document.
+## Forking the repo
 
-### Docker environment
+Contributing to Dapr often requires working with multiple repositories at once. We recommend creating a folder for Dapr and cloning all forked repositories in that folder. 
 
-1. Install [Docker](https://docs.docker.com/install/)
-    > For Linux, you'll have to configure docker to run without sudo for this to work, because of the environment variables.  See the following on how to configure [this](https://docs.docker.com/install/linux/linux-postinstall/).
+For instructions on how to fork a repo, [see this video on forking the dapr/docs repo](https://youtu.be/uPYuXcaEs-c?t=289). The process is the same, just for different repositories.
 
-2. Create your [Docker Hub account](https://hub.docker.com)
-
-
-### Go dev environment
-
-#### Linux and MacOS
-
-1. The Go language environment [(instructions)](https://golang.org/doc/install#tarball).
-   * Make sure that your GOPATH and PATH are configured correctly
-   ```bash
-   export GOPATH=~/go
-   export PATH=$PATH:$GOPATH/bin
-   ```
-2. [Delve](https://github.com/go-delve/delve/tree/master/Documentation/installation) for Debugging
-
-#### Windows
-
-1. The Go language environment [(instructions)](https://golang.org/doc/install#windows).
-   Make sure that your GOPATH and PATH are configured correctly - You may set environment variables through the "Environment Variables" button on the "Advanced" tab of the "System" control panel. Some versions of Windows provide this control panel through the "Advanced System Settings" option inside the "System" control panel.
-   ```
-   GOPATH=c:\go
-   PATH=%GOPATH%\bin;...
-   ```
-2. [Delve](https://github.com/go-delve/delve/tree/master/Documentation/installation) for Debugging
-3. [Git for Windows](https://gitforwindows.org)
-   * Install [Git with chocolatey](https://chocolatey.org/packages/git) and ensure that Git bin directory is in PATH environment variable
-    ```bash
-    choco install git -y --package-parameters="/GitAndUnixToolsOnPath /WindowsTerminal /NoShellIntegration"
-    ```
-4. [MinGW](http://www.mingw.org/)
-  Install [MinGW with chocolatey](https://chocolatey.org/packages/mingw) and ensure that MinGW bin directory is in PATH environment variable
-
-    ```bash
-    choco install mingw
-    ```
-
-### Kubernetes environment
-
-1. [Setup Minikube for Local environment](https://docs.dapr.io/operations/hosting/kubernetes/cluster/setup-minikube/)
-2. [Setup Azure Kubernetes Service](https://docs.dapr.io/operations/hosting/kubernetes/cluster/setup-aks/)
-3. [Helm 3.x](https://helm.sh/docs/intro/install/)
-
-### Installing Make
-
-Dapr uses `make` to build and test its binaries.
-
-#### Windows
-
-Download [MingGW](https://sourceforge.net/projects/mingw/files/MinGW/Extension/make/mingw32-make-3.80-3/) and use `ming32-make.exe` instead of `make`.
-
-Make sure `ming32-make.exe` is in your path.
-
-#### Linux
-
-```sudo apt-get install build-essential```
-
-#### Mac
-
-In Xcode preferences go to the "Downloads" tab and under "Components" push the "Install" button next to "Command Line Tools". After you have successfully downloaded and installed the command line tools you should also type the following command in the Terminal to make sure all your Xcode command line tools are switched to use the new versions:
-
-```sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer```
-
-Once everything is successfully installed you should see make and other command line developer tools in /usr/bin.
-
-## Cloning the repo
-
-```bash
-cd $GOPATH/src
-mkdir -p github.com/dapr/dapr
-git clone https://github.com/dapr/dapr.git github.com/dapr/dapr
+```sh
+mkdir dapr
+git clone https://github.com/dapr/dapr.git dapr/dapr
 ```
 
 ## Build the Dapr binaries
 
-You can build dapr binaries with the `make` tool.
-When running `make`, you need to be at the root of the `dapr/dapr` repo directory, for example: `$GOPATH/src/github.com/dapr/dapr`.<br><br>
-Once built, the release binaries will be found in `./dist/{os}_{arch}/release/`, where `{os}_{arch}` is your current OS and architecture.
+You can build Dapr binaries with the `make` tool.
 
-For example, running `make build` on MacOS will generate the directory `./dist/darwin_amd64/release.
+> On Windows, the `make` commands must be run under [git-bash](https://www.atlassian.com/git/tutorials/git-bash).
+>
+> These instructions also require that a `make` alias has been created for `mingw32-make.exe` according to the [setup instructions](./setup-dapr-development-env.md#installing-make).
 
-> Note : for a Windows environment with MinGW, use `mingw32-make.exe` instead of `make`.
+- When running `make`, you need to be at the root of the `dapr/dapr` repo directory, for example: `$GOPATH/src/github.com/dapr/dapr`.
 
-* Build for your current local environment
+- Once built, the release binaries will be found in `./dist/{os}_{arch}/release/`, where `{os}_{arch}` is your current OS and architecture.
 
-```bash
-cd $GOPATH/src/github.com/dapr/dapr/
-make build
-```
+  For example, running `make build` on an Intel-based macOS will generate the directory `./dist/darwin_amd64/release`.
 
-* Cross compile for multi platforms
+- To build for your current local environment:
 
-```bash
-make build GOOS=linux GOARCH=amd64
+   ```sh
+   cd dapr/dapr
+   make build
+   ```
+
+- To cross-compile for a different platform, use the `GOOS` and `GOARCH` environmental variables:
+
+   ```sh
+   make build GOOS=windows GOARCH=amd64
+   ```
+
+> For example, developers on Windows who prefer to develop in [WSL2](https://docs.microsoft.com/en-us/windows/wsl/install-win10) can use the Linux development environment to cross-compile binaries like `daprd.exe` that run on Windows natively.
+
+You can individually build the daprd binary:
+
+```sh
+cd cmd/daprd
+go build -tags=allcomponents -v
+# use it in this manner
+./daprd ...
+# if you need to execute a `dapr run` command with that newly-built binary:
+mv daprd ~/.dapr/bin/daprd
+dapr version # see `Runtime version: edge` to ensure you are using the newly built binary
+dapr run ... # this will use the newly-built binary
 ```
 
 ## Run unit tests
 
-```bash
+```sh
 make test
 ```
 
+## One-line command for local development
+
+```sh
+make check
+```
+
+This command will:
+
+- format, test and lint all the code 
+- check if you forgot to `git commit` something
+
+Note: To run linter locally, please use golangci-lint version v1.51.2, otherwise you might encounter errors. You can download version v1.64.6 [here](https://github.com/golangci/golangci-lint/releases/tag/v1.64.6).
+
 ## Debug Dapr
 
-We highly recommend to use [VSCode with Go plugin](https://marketplace.visualstudio.com/items?itemName=ms-vscode.Go) for your productivity. If you want to use the different editors, you can find the [list of editor plugins](https://github.com/go-delve/delve/blob/master/Documentation/EditorIntegration.md) for Delve.
+We recommend using VS Code with the [Go extension](https://marketplace.visualstudio.com/items?itemName=golang.Go) for your productivity. If you want to use other code editors, please refer to the list of [editor plugins for Delve](https://github.com/go-delve/delve/blob/master/Documentation/EditorIntegration.md).
 
-This section introduces how to start debugging with Delve CLI. Please see [Delve documentation](https://github.com/go-delve/delve/tree/master/Documentation) for the detail usage.
+This section introduces how to start debugging with the Delve CLI. Please refer to the [Delve documentation](https://github.com/go-delve/delve/tree/master/Documentation) for more details.
 
-### Start the dapr runtime with a debugger
+### Start the Dapr runtime with a debugger
+
+To start the Dapr runtime with a debugger, you need to use build tags to include the components you want to debug. The following build tags are available:
+
+- allcomponents - (default) includes all components in Dapr sidecar
+- stablecomponents - includes all stable components in Dapr sidecar
 
 ```bash
-$ cd $GOPATH/src/github.com/dapr/dapr/cmd/daprd
-$ dlv debug .
+$ cd dapr/dapr/cmd/daprd
+$ dlv debug . --build-flags=--tags=allcomponents
 Type 'help' for list of commands.
 (dlv) break main.main
 (dlv) continue
@@ -132,63 +103,70 @@ Type 'help' for list of commands.
 
 ### Attach a Debugger to running process
 
-This is useful to debug dapr when the process is running.
+This is useful to debug Dapr when the process is running.
 
-1. Build dapr binaries for debugging
-   With `DEBUG=1` option, dapr binaries will be generated without code optimization in `./dist/{os}_{arch}/debug/`
+1. Build Dapr binaries for debugging.
 
-```bash
-$ make DEBUG=1 build
-```
+   Use the `DEBUG=1` option to generate Dapr binaries without code optimization in `./dist/{os}_{arch}/debug/`
 
-2. Create component yaml file under `./dist/{os}_{arch}/debug/components` e.g. statstore component yaml
-3. Run dapr runtime
+   ```bash
+   make DEBUG=1 build
+   ```
 
-```bash
-$ /dist/{os}_{arch}/debug/daprd
-```
+2. Create a component YAML file under `./dist/{os}_{arch}/debug/components` (for example a statestore component YAML).
 
-4. Find the process id and attach the debugger
+3. Start the Dapr runtime
 
-```bash
-$ dlv attach [pid]
-```
+   ```bash
+   /dist/{os}_{arch}/debug/daprd
+   ```
+
+4. Find the process ID (e.g. `PID` displayed by the `ps` command for `daprd`) and attach the debugger
+
+   ```bash
+   dlv attach {PID}
+   ```
+
+### Debug Dapr With Goland IDE
+
+1. Build the daprd binary `go build -tags=allcomponents -v` from `/cmd/daprd`.
+2. Proceed to run client code necessary for testing purposes and set break points as needed.
+
+![Build & Run Daprd In Goland IDE](build-and-run-daprd.png)
 
 ### Debug unit-tests
 
+Specify the package that you want to test when running the `dlv test`. For example, to debug the `./pkg/actors` tests:
+
 ```bash
-# Specify the package that you want to test
-# e.g. debugging ./pkg/actors
-$ dlv test ./pkg/actors
+dlv test ./pkg/actors
 ```
 
 ## Developing on Kubernetes environment
 
 ### Setting environment variable
 
-* **DAPR_REGISTRY** : should be set to docker.io/<your_docker_hub_account>.
-* **DAPR_TAG** : should be set to whatever value you wish to use for a container image tag.
+- **DAPR_REGISTRY** : should be set to `docker.io/<your_docker_hub_account>`.
+- **DAPR_TAG** : should be set to whatever value you wish to use for a container image tag (`dev` is a common choice).
+- **ONLY_DAPR_IMAGE**: should be set to `true` to use a single `dapr` image instead of individual images (like sentry, injector, daprd, etc.).
 
-**Linux/macOS**
+On Linux/macOS:
 
-```
+```bash
 export DAPR_REGISTRY=docker.io/<your_docker_hub_account>
 export DAPR_TAG=dev
 ```
 
-**Windows**
+On Windows:
 
-```
+```cmd
 set DAPR_REGISTRY=docker.io/<your_docker_hub_account>
 set DAPR_TAG=dev
 ```
 
-### Building the Container Image
+### Building the container image
 
-Run the appropriate command below to build the container image.
-
-**Linux/macOS**
-```
+```bash
 # Build Linux binaries
 make build-linux
 
@@ -196,66 +174,56 @@ make build-linux
 make docker-build
 ```
 
-**Windows**
-```
-# Build Linux binaries
-mingw32-make build-linux
+## Push the container image
 
-# Build Docker image with Linux binaries
-mingw32-make.exe docker-build
-```
+To push the image to DockerHub, complete your `docker login` and run:
 
-## Push the Container Image
-
-To push the image to DockerHub, run:
-
-**Linux/macOS**
-```
+```bash
 make docker-push
 ```
 
-**Windows**
-```
-mingw32-make.exe docker-push
-```
-
-## Deploy Dapr With Your Changes
+## Deploy Dapr with your Changes
 
 Now we'll deploy Dapr with your changes.
 
-Create the dapr-system namespace
+To create the dapr-system namespace:
 
-```
+```bash
 kubectl create namespace dapr-system
 ```
 
 If you deployed Dapr to your cluster before, delete it now using:
 
-```
+```bash
 helm uninstall dapr -n dapr-system
 ```
 
-and run the following to deploy your change to your Kubernetes cluster:
+To deploy your changes to your Kubernetes cluster:
 
-**Linux/macOS**
-```
+```bash
 make docker-deploy-k8s
-```
-
-**Windows**
-```
-mingw32-make.exe docker-deploy-k8s
 ```
 
 ## Verifying your changes
 
-Once Dapr is deployed, print the Dapr pods:
+Once Dapr is deployed, list the Dapr pods:
 
-```
-kubectl get pod -n dapr-system
+```bash
+$ kubectl get pod -n dapr-system
 
 NAME                                    READY   STATUS    RESTARTS   AGE
 dapr-operator-86cddcfcb7-v2zjp          1/1     Running   0          4d3h
 dapr-placement-5d6465f8d5-pz2qt         1/1     Running   0          4d3h
 dapr-sidecar-injector-dc489d7bc-k2h4q   1/1     Running   0          4d3h
 ```
+
+## Debug Dapr in a Kubernetes deployment
+
+Refer to the [Dapr Docs](https://docs.dapr.io/developing-applications/debugging/debug-k8s/) on how to:
+
+- [Debug the Dapr control plane on Kubernetes](https://docs.dapr.io/developing-applications/debugging/debug-k8s/debug-dapr-services/)
+- [Debug the Dapr sidecar (daprd) on Kubernetes](https://docs.dapr.io/developing-applications/debugging/debug-k8s/debug-daprd/)
+
+## See also
+
+- Setting up a development environment [for building Dapr components](https://github.com/dapr/components-contrib/blob/master/docs/developing-component.md)

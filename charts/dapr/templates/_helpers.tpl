@@ -30,3 +30,20 @@ Create chart name and version as used by the chart label.
 {{- define "k8s_operator.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+
+{{/*
+Formats imagePullSecrets. Input is dict( "imagePullSecrets" .{specific imagePullSecrets}).
+*/}}
+{{- define "dapr.imagePullSecrets" -}}
+{{- if eq (typeOf .imagePullSecrets) "string" -}} {{- /* Single string value */ -}}
+- name: {{ .imagePullSecrets }}
+{{- else -}} {{- /* Not a string value, iterate */ -}}
+{{- range .imagePullSecrets -}}
+{{- if eq (typeOf .) "map[string]interface {}" -}} {{- /* k8s style */ -}}
+- {{ toYaml (dict "name" .name) | trim }}
+{{ else }} {{- /* helm style */ -}}
+- name: {{ . }}
+{{ end }} {{- /* End of inner if */ -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
