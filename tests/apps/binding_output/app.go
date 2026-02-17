@@ -1,7 +1,15 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package main
 
@@ -12,21 +20,44 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+
+	"github.com/gorilla/mux"
+	"google.golang.org/protobuf/types/known/anypb"
 
 	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
 	runtimev1pb "github.com/dapr/dapr/pkg/proto/runtime/v1"
-	"github.com/golang/protobuf/ptypes/any"
-
-	"google.golang.org/grpc"
-
-	"github.com/gorilla/mux"
+	"github.com/dapr/dapr/tests/apps/utils"
 )
 
 const (
-	appPort      = 3000
-	daprPort     = 3500
-	daprPortGRPC = 50001
+	appPort                          = 3000
+	daprPort                         = 3500
+	DaprTestTopicEnvVar              = "DAPR_TEST_TOPIC_NAME"
+	DaprTestGRPCTopicEnvVar          = "DAPR_TEST_GRPC_TOPIC_NAME"
+	DaprTestInputBindingServiceEnVar = "DAPR_TEST_INPUT_BINDING_SVC"
 )
+
+var (
+	daprClient      runtimev1pb.DaprClient
+	topicName       = "test-topic"
+	topicNameGrpc   = "test-topic-grpc"
+	inputbindingSvc = "bindinginputgrpc"
+)
+
+func init() {
+	if envTopicName := os.Getenv(DaprTestTopicEnvVar); len(envTopicName) != 0 {
+		topicName = envTopicName
+	}
+
+	if envGrpcTopic := os.Getenv(DaprTestGRPCTopicEnvVar); len(envGrpcTopic) != 0 {
+		topicNameGrpc = envGrpcTopic
+	}
+
+	if envinputBinding := os.Getenv(DaprTestInputBindingServiceEnVar); len(envinputBinding) != 0 {
+		inputbindingSvc = envinputBinding
+	}
+}
 
 type testCommandRequest struct {
 	Messages []struct {
@@ -57,7 +88,7 @@ func testHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := fmt.Sprintf("http://localhost:%d/v1.0/bindings/test-topic", daprPort)
+	url := fmt.Sprintf("http://localhost:%d/v1.0/bindings/%s", daprPort, topicName)
 
 	for _, message := range requestBody.Messages {
 		body, err := json.Marshal(&message)
@@ -95,27 +126,17 @@ func sendGRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", daprPortGRPC), grpc.WithInsecure())
-	if err != nil {
-		log.Printf("Could not make dapr client: %s", err.Error())
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	defer conn.Close()
-
-	client := runtimev1pb.NewDaprClient(conn)
-
 	for _, message := range requestBody.Messages {
 		body, _ := json.Marshal(&message)
 
 		log.Printf("Sending message: %s", body)
 		req := runtimev1pb.InvokeBindingRequest{
-			Name:      "test-topic-grpc",
+			Name:      topicNameGrpc,
 			Data:      body,
 			Operation: "create",
 		}
 
-		_, err = client.InvokeBinding(context.Background(), &req)
+		_, err = daprClient.InvokeBinding(context.Background(), &req)
 		if err != nil {
 			log.Printf("Error sending request to GRPC output binding: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -128,39 +149,32 @@ func sendGRPC(w http.ResponseWriter, r *http.Request) {
 func getReceivedTopicsGRPC(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Entered getReceivedTopicsGRPC")
 
-	conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", daprPortGRPC), grpc.WithInsecure())
-	if err != nil {
-		log.Printf("Could not make dapr client: %s", err.Error())
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	defer conn.Close()
-
-	client := runtimev1pb.NewDaprClient(conn)
-
 	req := runtimev1pb.InvokeServiceRequest{
-		Id: "bindinginputgrpc",
+		Id: inputbindingSvc,
 		Message: &commonv1pb.InvokeRequest{
 			Method: "GetReceivedTopics",
-			Data:   &any.Any{},
+			Data:   &anypb.Any{},
 			HttpExtension: &commonv1pb.HTTPExtension{
-				Verb: commonv1pb.HTTPExtension_POST,
+				Verb: commonv1pb.HTTPExtension_POST, //nolint:nosnakecase
 			},
 		},
 	}
 
-	resp, err := client.InvokeService(context.Background(), &req)
+	resp, err := daprClient.InvokeService(context.Background(), &req)
 	if err != nil {
 		log.Printf("Could not get received messages: %s", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	w.Write(resp.Data.Value)
+	w.Write(resp.GetData().GetValue())
 }
 
 // appRouter initializes restful api router
-func appRouter() *mux.Router {
+func appRouter() http.Handler {
 	router := mux.NewRouter().StrictSlash(true)
+
+	// Log requests and their processing time
+	router.Use(utils.LoggerMiddleware)
 
 	router.HandleFunc("/", indexHandler).Methods("GET")
 	router.HandleFunc("/tests/send", testHandler).Methods("POST")
@@ -173,7 +187,8 @@ func appRouter() *mux.Router {
 }
 
 func main() {
-	log.Printf("Hello Dapr - listening on http://localhost:%d", appPort)
+	daprClient = utils.GetGRPCClient(50001)
 
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", appPort), appRouter()))
+	log.Printf("Hello Dapr - listening on http://localhost:%d", appPort)
+	utils.StartServer(appPort, appRouter, true, false)
 }

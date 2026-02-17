@@ -1,7 +1,15 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package main
 
@@ -10,30 +18,50 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/dapr/dapr/tests/apps/utils"
 
 	"github.com/gorilla/mux"
 )
 
 const (
-	appPort                 = 3000
-	daprV1URL               = "http://localhost:3500/v1.0"
-	actorMethodURLFormat    = daprV1URL + "/actors/%s/%s/%s/%s"
-	actorSaveStateURLFormat = daprV1URL + "/actors/%s/%s/state/"
-	actorGetStateURLFormat  = daprV1URL + "/actors/%s/%s/state/%s/"
-	defaultActorType        = "testactorfeatures"   // Actor type must be unique per test app.
-	actorTypeEnvName        = "TEST_APP_ACTOR_TYPE" // Env variable tests can set to change actor type.
-	actorIdleTimeout        = "1h"
-	actorScanInterval       = "30s"
-	drainOngoingCallTimeout = "30s"
-	drainRebalancedActors   = true
-	secondsToWaitInMethod   = 5
+	daprBaseURLFormat               = "http://localhost:%d/v1.0"
+	actorMethodURLFormat            = daprBaseURLFormat + "/actors/%s/%s/%s/%s"
+	actorSaveStateURLFormat         = daprBaseURLFormat + "/actors/%s/%s/state/"
+	actorGetStateURLFormat          = daprBaseURLFormat + "/actors/%s/%s/state/%s/"
+	actorReminderURLFormat          = daprBaseURLFormat + "/actors/%s/%s/%s/%s"
+	defaultActorType                = "testactorfeatures"                   // Actor type must be unique per test app.
+	actorTypeEnvName                = "TEST_APP_ACTOR_TYPE"                 // To set to change actor type.
+	actorRemindersPartitionsEnvName = "TEST_APP_ACTOR_REMINDERS_PARTITIONS" // To set actor type partition count.
+	actorIdleTimeout                = "1h"
+	drainOngoingCallTimeout         = "30s"
+	drainRebalancedActors           = true
+	secondsToWaitInMethod           = 5
 )
+
+var (
+	appPort      = 3000
+	daprHTTPPort = 3500
+	httpClient   = utils.NewHTTPClient()
+)
+
+func init() {
+	p := os.Getenv("DAPR_HTTP_PORT")
+	if p != "" && p != "0" {
+		daprHTTPPort, _ = strconv.Atoi(p)
+	}
+	p = os.Getenv("PORT")
+	if p != "" && p != "0" {
+		appPort, _ = strconv.Atoi(p)
+	}
+}
 
 type daprActor struct {
 	actorType string
@@ -51,13 +79,12 @@ type actorLogEntry struct {
 }
 
 type daprConfig struct {
-	Entities                []string `json:"entities,omitempty"`
-	ActorIdleTimeout        string   `json:"actorIdleTimeout,omitempty"`
-	ActorScanInterval       string   `json:"actorScanInterval,omitempty"`
-	DrainOngoingCallTimeout string   `json:"drainOngoingCallTimeout,omitempty"`
-	DrainRebalancedActors   bool     `json:"drainRebalancedActors,omitempty"`
+	Entities                   []string `json:"entities,omitempty"`
+	ActorIdleTimeout           string   `json:"actorIdleTimeout,omitempty"`
+	DrainOngoingCallTimeout    string   `json:"drainOngoingCallTimeout,omitempty"`
+	DrainRebalancedActors      bool     `json:"drainRebalancedActors,omitempty"`
+	RemindersStoragePartitions int      `json:"remindersStoragePartitions,omitempty"`
 }
-
 
 // response object from an actor invocation request
 type daprActorResponse struct {
@@ -67,10 +94,15 @@ type daprActorResponse struct {
 
 // request for timer or reminder.
 type timerReminderRequest struct {
-	Data     string `json:"data,omitempty"`
-	DueTime  string `json:"dueTime,omitempty"`
-	Period   string `json:"period,omitempty"`
-	Callback string `json:"callback,omitempty"`
+	OldName   string `json:"oldName,omitempty"`
+	ActorType string `json:"actorType,omitempty"`
+	ActorID   string `json:"actorID,omitempty"`
+	NewName   string `json:"newName,omitempty"`
+	Data      string `json:"data,omitempty"`
+	DueTime   string `json:"dueTime,omitempty"`
+	Period    string `json:"period,omitempty"`
+	TTL       string `json:"ttl,omitempty"`
+	Callback  string `json:"callback,omitempty"`
 }
 
 // requestResponse represents a request or response for the APIs in this app.
@@ -85,46 +117,66 @@ type response struct {
 
 // copied from actors.go for test purposes
 type TempTransactionalOperation struct {
-	Operation string      `json:"operation"`
-	Request   interface{} `json:"request"`
+	Operation string `json:"operation"`
+	Request   any    `json:"request"`
 }
 
 type TempTransactionalUpsert struct {
-	Key   string      `json:"key"`
-	Value interface{} `json:"value"`
+	Key   string `json:"key"`
+	Value any    `json:"value"`
 }
 
 type TempTransactionalDelete struct {
 	Key string `json:"key"`
 }
 
-var actorLogs = []actorLogEntry{}
-var actorLogsMutex = &sync.Mutex{}
-var registedActorType = getActorType()
-var actors sync.Map
+var (
+	actorLogs           = []actorLogEntry{}
+	actorLogsMutex      = &sync.Mutex{}
+	registeredActorType = getActorType()
+	actors              sync.Map
+)
 
-var daprConfigResponse = daprConfig{
-	[]string{getActorType()},
-	actorIdleTimeout,
-	actorScanInterval,
-	drainOngoingCallTimeout,
-	drainRebalancedActors,
+var envOverride sync.Map
+
+func getEnv(envName string) string {
+	value, ok := envOverride.Load(envName)
+	if ok {
+		return fmt.Sprintf("%v", value)
+	}
+
+	return os.Getenv(envName)
 }
 
 func resetLogs() {
 	actorLogsMutex.Lock()
 	defer actorLogsMutex.Unlock()
 
-	actorLogs = []actorLogEntry{}
+	// Reset the slice without clearing the memory
+	actorLogs = actorLogs[:0]
 }
 
 func getActorType() string {
-	actorType := os.Getenv(actorTypeEnvName)
+	actorType := getEnv(actorTypeEnvName)
 	if actorType == "" {
 		return defaultActorType
 	}
 
 	return actorType
+}
+
+func getActorRemindersPartitions() int {
+	val := getEnv(actorRemindersPartitionsEnvName)
+	if val == "" {
+		return 0
+	}
+
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return 0
+	}
+
+	return n
 }
 
 func appendLog(actorType string, actorID string, action string, start int) {
@@ -142,7 +194,12 @@ func appendLog(actorType string, actorID string, action string, start int) {
 }
 
 func getLogs() []actorLogEntry {
-	return actorLogs
+	actorLogsMutex.Lock()
+	defer actorLogsMutex.Unlock()
+
+	dst := make([]actorLogEntry, len(actorLogs))
+	copy(dst, actorLogs)
+	return dst
 }
 
 func createActorID(actorType string, id string) string {
@@ -158,17 +215,29 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 func logsHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Processing dapr %s request for %s", r.Method, r.URL.RequestURI())
-	if r.Method == "DELETE" {
+	if r.Method == http.MethodDelete {
 		resetLogs()
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(getLogs())
+
+	log.Print("Responding with logs:")
+	json.NewEncoder(io.MultiWriter(w, os.Stdout)).
+		Encode(getLogs())
 }
 
 func configHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Processing dapr request for %s, responding with %v", r.URL.RequestURI(), daprConfigResponse)
+	daprConfigResponse := daprConfig{
+		[]string{getActorType()},
+		actorIdleTimeout,
+		drainOngoingCallTimeout,
+		drainRebalancedActors,
+		getActorRemindersPartitions(),
+	}
+
+	log.Printf("Processing dapr request for %s, responding with %#v", r.URL.RequestURI(), daprConfigResponse)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -203,6 +272,15 @@ func actorMethodHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Specific case to test reminder that deletes itself in its callback
+	if id == "1001e" {
+		url := fmt.Sprintf(actorReminderURLFormat, daprHTTPPort, actorType, id, "reminders", method)
+		_, e := httpCall("DELETE", url, nil, 204)
+		if e != nil {
+			return
+		}
+	}
+
 	hostname, err := os.Hostname()
 	var data []byte
 	if method == "hostname" {
@@ -223,7 +301,7 @@ func actorMethodHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		fmt.Printf("Error: %v", err.Error())
+		fmt.Printf("Error: %v", err.Error()) //nolint:forbidigo
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -246,7 +324,7 @@ func deactivateActorHandler(w http.ResponseWriter, r *http.Request) {
 	actorType := mux.Vars(r)["actorType"]
 	id := mux.Vars(r)["id"]
 
-	if actorType != registedActorType {
+	if actorType != registeredActorType {
 		log.Printf("Unknown actor type: %s", actorType)
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -256,7 +334,7 @@ func deactivateActorHandler(w http.ResponseWriter, r *http.Request) {
 	action := ""
 
 	_, ok := actors.Load(actorID)
-	if ok && r.Method == "DELETE" {
+	if ok && r.Method == http.MethodDelete {
 		action = "deactivation"
 		actors.Delete(actorID)
 	}
@@ -267,7 +345,6 @@ func deactivateActorHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // calls Dapr's Actor method/timer/reminder: simulating actor client call.
-// nolint:gosec
 func testCallActorHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Processing %s test request for %s", r.Method, r.URL.RequestURI())
 
@@ -276,8 +353,10 @@ func testCallActorHandler(w http.ResponseWriter, r *http.Request) {
 	callType := mux.Vars(r)["callType"]
 	method := mux.Vars(r)["method"]
 
-	url := fmt.Sprintf(actorMethodURLFormat, actorType, id, callType, method)
+	url := fmt.Sprintf(actorMethodURLFormat, daprHTTPPort, actorType, id, callType, method)
 
+	log.Printf("Invoking: %s %s\n", r.Method, url)
+	expectedHTTPCode := 200
 	var req timerReminderRequest
 	switch callType {
 	case "method":
@@ -285,17 +364,23 @@ func testCallActorHandler(w http.ResponseWriter, r *http.Request) {
 	case "timers":
 		fallthrough
 	case "reminders":
-		body, err := ioutil.ReadAll(r.Body)
+		if r.Method == http.MethodGet {
+			expectedHTTPCode = 200
+		} else {
+			expectedHTTPCode = 204
+		}
+		body, err := io.ReadAll(r.Body)
 		defer r.Body.Close()
 		if err != nil {
 			log.Printf("Could not get reminder request: %s", err.Error())
 			return
 		}
 
+		log.Println("Body data: " + string(body))
 		json.Unmarshal(body, &req)
 	}
 
-	body, err := httpCall(r.Method, url, req, 200)
+	body, err := httpCall(r.Method, url, req, expectedHTTPCode)
 	if err != nil {
 		log.Printf("Could not read actor's test response: %s", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
@@ -321,7 +406,7 @@ func testCallActorHandler(w http.ResponseWriter, r *http.Request) {
 func testCallMetadataHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Processing %s test request for %s", r.Method, r.URL.RequestURI())
 
-	metadataURL := fmt.Sprintf("%s/metadata", daprV1URL)
+	metadataURL := fmt.Sprintf(daprBaseURLFormat+"/metadata", daprHTTPPort)
 	body, err := httpCall(r.Method, metadataURL, nil, 200)
 	if err != nil {
 		log.Printf("Could not read metadata response: %s", err.Error())
@@ -332,12 +417,63 @@ func testCallMetadataHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
+func shutdownHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Processing %s test request for %s", r.Method, r.URL.RequestURI())
+
+	shutdownURL := fmt.Sprintf(daprBaseURLFormat+"/shutdown", daprHTTPPort)
+	_, err := httpCall(r.Method, shutdownURL, nil, 204)
+	if err != nil {
+		log.Printf("Could not shutdown sidecar: %s", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		log.Fatal("simulating fatal shutdown")
+	}()
+}
+
+func shutdownSidecarHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Processing %s test request for %s", r.Method, r.URL.RequestURI())
+
+	shutdownURL := fmt.Sprintf(daprBaseURLFormat+"/shutdown", daprHTTPPort)
+	_, err := httpCall(r.Method, shutdownURL, nil, 204)
+	if err != nil {
+		log.Printf("Could not shutdown sidecar: %s", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func testEnvHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Processing %s test request for %s", r.Method, r.URL.RequestURI())
+
+	envName := mux.Vars(r)["envName"]
+	if r.Method == http.MethodGet {
+		envValue := getEnv(envName)
+
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(envValue))
+	}
+
+	if r.Method == http.MethodPost {
+		body, err := io.ReadAll(r.Body)
+		defer r.Body.Close()
+		if err != nil {
+			log.Printf("Could not read config env value: %s", err.Error())
+			return
+		}
+
+		envOverride.Store(envName, string(body))
+	}
+}
+
 // the test side calls the 4 cases below in order
 func actorStateTest(testName string, w http.ResponseWriter, actorType string, id string) error {
-
 	// save multiple key values
 	if testName == "savestatetest" {
-		url := fmt.Sprintf(actorSaveStateURLFormat, actorType, id)
+		url := fmt.Sprintf(actorSaveStateURLFormat, daprHTTPPort, actorType, id)
 
 		operations := []TempTransactionalOperation{
 			{
@@ -377,11 +513,10 @@ func actorStateTest(testName string, w http.ResponseWriter, actorType string, id
 			return err
 		}
 	} else if testName == "getstatetest" {
-
 		// perform a get on a key saved above
-		url := fmt.Sprintf(actorGetStateURLFormat, actorType, id, "key1")
+		url := fmt.Sprintf(actorGetStateURLFormat, daprHTTPPort, actorType, id, "key1")
 
-		body, err := httpCall("GET", url, nil, 200)
+		_, err := httpCall("GET", url, nil, 200)
 		if err != nil {
 			log.Printf("actor state call failed: %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
@@ -389,8 +524,8 @@ func actorStateTest(testName string, w http.ResponseWriter, actorType string, id
 		}
 
 		// query a non-existing key.  This should return 204 with 0 length response.
-		url = fmt.Sprintf(actorGetStateURLFormat, actorType, id, "keynotpresent")
-		body, err = httpCall("GET", url, nil, 204)
+		url = fmt.Sprintf(actorGetStateURLFormat, daprHTTPPort, actorType, id, "keynotpresent")
+		body, err := httpCall("GET", url, nil, 204)
 		if err != nil {
 			log.Printf("actor state call failed: %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
@@ -398,14 +533,14 @@ func actorStateTest(testName string, w http.ResponseWriter, actorType string, id
 		}
 
 		if len(body) != 0 {
-			log.Println("expected 0 length reponse")
+			log.Println("expected 0 length response")
 			w.WriteHeader(http.StatusInternalServerError)
-			return errors.New("expected 0 length reponse")
+			return errors.New("expected 0 length response")
 		}
 
 		// query a non-existing actor.  This should return 400.
-		url = fmt.Sprintf(actorGetStateURLFormat, actorType, "actoriddoesnotexist", "keynotpresent")
-		body, err = httpCall("GET", url, nil, 400)
+		url = fmt.Sprintf(actorGetStateURLFormat, daprHTTPPort, actorType, "actoriddoesnotexist", "keynotpresent")
+		_, err = httpCall("GET", url, nil, 400)
 		if err != nil {
 			log.Printf("actor state call failed: %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
@@ -413,7 +548,7 @@ func actorStateTest(testName string, w http.ResponseWriter, actorType string, id
 		}
 	} else if testName == "savestatetest2" {
 		// perform another transaction including a delete
-		url := fmt.Sprintf(actorSaveStateURLFormat, actorType, id)
+		url := fmt.Sprintf(actorSaveStateURLFormat, daprHTTPPort, actorType, id)
 
 		// modify 1 key and delete another
 		operations := []TempTransactionalOperation{
@@ -440,11 +575,10 @@ func actorStateTest(testName string, w http.ResponseWriter, actorType string, id
 			return err
 		}
 	} else if testName == "getstatetest2" {
-
 		// perform a get on an existing key
-		url := fmt.Sprintf(actorGetStateURLFormat, actorType, id, "key1")
+		url := fmt.Sprintf(actorGetStateURLFormat, daprHTTPPort, actorType, id, "key1")
 
-		body, err := httpCall("GET", url, nil, 200)
+		_, err := httpCall("GET", url, nil, 200)
 		if err != nil {
 			log.Printf("actor state call failed: %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
@@ -452,9 +586,9 @@ func actorStateTest(testName string, w http.ResponseWriter, actorType string, id
 		}
 
 		// query a non-existing key - this was present but deleted.  This should return 204 with 0 length response.
-		url = fmt.Sprintf(actorGetStateURLFormat, actorType, id, "key4")
+		url = fmt.Sprintf(actorGetStateURLFormat, daprHTTPPort, actorType, id, "key4")
 
-		body, err = httpCall("GET", url, nil, 204)
+		body, err := httpCall("GET", url, nil, 204)
 		if err != nil {
 			log.Printf("actor state call failed: %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
@@ -462,15 +596,43 @@ func actorStateTest(testName string, w http.ResponseWriter, actorType string, id
 		}
 
 		if len(body) != 0 {
-			log.Println("expected 0 length reponse")
+			log.Println("expected 0 length response")
 			w.WriteHeader(http.StatusInternalServerError)
-			return errors.New("expected 0 length reponse")
+			return errors.New("expected 0 length response")
 		}
 	} else {
 		return errors.New("actorStateTest() - unexpected option")
 	}
 
 	return nil
+}
+
+func nonHostedTestHandler(w http.ResponseWriter, r *http.Request) {
+	log.Print("Testing non-hosted actor reminders")
+
+	url := fmt.Sprintf(actorReminderURLFormat, daprHTTPPort, "nonhosted", "id0", "reminders", "myreminder")
+	tests := map[string]struct {
+		Method string
+		Body   any
+	}{
+		"GetReminder":    {"GET", nil},
+		"CreateReminder": {"PUT", struct{}{}},
+		"DeleteReminder": {"DELETE", struct{}{}},
+	}
+	for op, t := range tests {
+		body, err := httpCall(t.Method, url, t.Body, http.StatusForbidden)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error performing %s request: %v", op, err), http.StatusInternalServerError)
+			return
+		}
+		if !bytes.Contains(body, []byte("ERR_ACTOR_REMINDER_NON_HOSTED")) {
+			http.Error(w, fmt.Sprintf("Response from %s doesn't contain the required error message: %s", op, string(body)), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "OK")
 }
 
 func httpCall(method string, url string, requestBody interface{}, expectedHTTPStatusCode int) ([]byte, error) {
@@ -489,8 +651,7 @@ func httpCall(method string, url string, requestBody interface{}, expectedHTTPSt
 		return nil, err
 	}
 
-	client := http.Client{}
-	res, err := client.Do(req)
+	res, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -498,17 +659,16 @@ func httpCall(method string, url string, requestBody interface{}, expectedHTTPSt
 	defer res.Body.Close()
 
 	if res.StatusCode != expectedHTTPStatusCode {
-		errBody, err := ioutil.ReadAll(res.Body)
+		var errBody []byte
+		errBody, err = io.ReadAll(res.Body)
 		if err == nil {
-			t := fmt.Errorf("Expected http status %d, received %d, payload ='%s'", expectedHTTPStatusCode, res.StatusCode, string(errBody))
-			return nil, t
+			return nil, fmt.Errorf("Expected http status %d, received %d, payload ='%s'", expectedHTTPStatusCode, res.StatusCode, string(errBody)) //nolint:stylecheck
 		}
 
-		t := fmt.Errorf("Expected http status %d, received %d", expectedHTTPStatusCode, res.StatusCode)
-		return nil, t
+		return nil, fmt.Errorf("Expected http status %d, received %d", expectedHTTPStatusCode, res.StatusCode) //nolint:stylecheck
 	}
 
-	resBody, err := ioutil.ReadAll(res.Body)
+	resBody, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -523,35 +683,43 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 
 // epoch returns the current unix epoch timestamp
 func epoch() int {
-	return (int)(time.Now().UTC().UnixNano() / 1000000)
+	return int(time.Now().UnixMilli())
 }
 
 // appRouter initializes restful api router
-func appRouter() *mux.Router {
+func appRouter() http.Handler {
 	router := mux.NewRouter().StrictSlash(true)
+
+	// Log requests and their processing time
+	router.Use(utils.LoggerMiddleware)
 
 	router.HandleFunc("/", indexHandler).Methods("GET")
 	router.HandleFunc("/dapr/config", configHandler).Methods("GET")
 
-	router.HandleFunc("/test/{actorType}/{id}/{callType}/{method}", testCallActorHandler).Methods("POST", "DELETE")
+	// The POST method is used to register reminder
+	// The DELETE method is used to unregister reminder
+	// The PATCH method is used to rename reminder
+	// The GET method is used to get reminder
+	router.HandleFunc("/test/{actorType}/{id}/{callType}/{method}", testCallActorHandler).Methods("POST", "DELETE", "PATCH", "GET")
 
 	router.HandleFunc("/actors/{actorType}/{id}/method/{method}", actorMethodHandler).Methods("PUT")
 	router.HandleFunc("/actors/{actorType}/{id}/method/{reminderOrTimer}/{method}", actorMethodHandler).Methods("PUT")
 
 	router.HandleFunc("/actors/{actorType}/{id}", deactivateActorHandler).Methods("POST", "DELETE")
 
-	router.HandleFunc("/test/logs", logsHandler).Methods("GET")
-	router.HandleFunc("/test/metadata", testCallMetadataHandler).Methods("GET")
-	router.HandleFunc("/test/logs", logsHandler).Methods("DELETE")
-	router.HandleFunc("/healthz", healthzHandler).Methods("GET")
+	router.HandleFunc("/test/nonhosted", nonHostedTestHandler).Methods("POST")
 
-	router.Use(mux.CORSMethodMiddleware(router))
+	router.HandleFunc("/test/logs", logsHandler).Methods("GET", "DELETE")
+	router.HandleFunc("/test/metadata", testCallMetadataHandler).Methods("GET")
+	router.HandleFunc("/test/env/{envName}", testEnvHandler).Methods("GET", "POST")
+	router.HandleFunc("/test/shutdown", shutdownHandler).Methods("POST")
+	router.HandleFunc("/test/shutdownsidecar", shutdownSidecarHandler).Methods("POST")
+	router.HandleFunc("/healthz", healthzHandler).Methods("GET")
 
 	return router
 }
 
 func main() {
 	log.Printf("Actor App - listening on http://localhost:%d", appPort)
-
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", appPort), appRouter()))
+	utils.StartServer(appPort, appRouter, true, false)
 }

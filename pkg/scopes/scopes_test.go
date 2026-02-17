@@ -7,7 +7,7 @@ import (
 )
 
 func TestGetAllowedTopics(t *testing.T) {
-	var allowedTests = []struct {
+	allowedTests := []struct {
 		Metadata map[string]string
 		Target   []string
 		Msg      string
@@ -40,10 +40,17 @@ func TestGetAllowedTopics(t *testing.T) {
 		},
 		{
 			Metadata: map[string]string{
-				"allowedTopics": "topic1, topic1, topic1",
+				"allowedTopics": "topic1, topic1, topic1", //nolint:dupword
 			},
 			Target: []string{"topic1"},
 			Msg:    "pass, include whitespace and repeated topic",
+		},
+		{
+			Metadata: map[string]string{
+				"Allowedtopics": "topic1",
+			},
+			Target: []string{"topic1"},
+			Msg:    "pass, case-insensitive match",
 		},
 	}
 	for _, item := range allowedTests {
@@ -51,8 +58,65 @@ func TestGetAllowedTopics(t *testing.T) {
 	}
 }
 
+func TestGetProtectedTopics(t *testing.T) {
+	protectedTests := []struct {
+		Metadata map[string]string
+		Target   []string
+		Msg      string
+	}{
+		{
+			Metadata: nil,
+			Target:   []string{},
+			Msg:      "pass",
+		},
+		{
+			Metadata: map[string]string{},
+			Target:   []string{},
+			Msg:      "pass",
+		},
+		{
+			Metadata: map[string]string{
+				"protectedTopics": "",
+			},
+			Target: []string{},
+			Msg:    "pass",
+		},
+		{
+			Metadata: map[string]string{
+				"protectedTopics": "topic1,topic2,topic3",
+			},
+			Target: []string{"topic1", "topic2", "topic3"},
+			Msg:    "pass",
+		},
+		{
+			Metadata: map[string]string{
+				"protectedTopics": "topic1, topic2, topic3",
+			},
+			Target: []string{"topic1", "topic2", "topic3"},
+			Msg:    "pass, include whitespace",
+		},
+		{
+			Metadata: map[string]string{
+				"protectedTopics": "topic1, topic1, topic1", //nolint:dupword
+			},
+			Target: []string{"topic1"},
+			Msg:    "pass, include whitespace and repeated topic",
+		},
+		{
+			Metadata: map[string]string{
+				"protectedTOPICS": "topic1",
+			},
+			Target: []string{"topic1"},
+			Msg:    "pass, case-insensitive match",
+		},
+	}
+	for _, item := range protectedTests {
+		assert.Equal(t, GetProtectedTopics(item.Metadata), item.Target)
+	}
+}
+
 func TestGetScopedTopics(t *testing.T) {
-	var scopedTests = []struct {
+	scopedTests := []struct {
 		Scope    string
 		AppID    string
 		Metadata map[string]string
@@ -110,6 +174,51 @@ func TestGetScopedTopics(t *testing.T) {
 			},
 			Target: []string{"topic1"},
 			Msg:    "pass, include repeated appid and topic",
+		},
+		{
+			Scope: "subscriptionScopes",
+			AppID: "appid1",
+			Metadata: map[string]string{
+				"subscriptionScopes": "appid1",
+			},
+			Target: []string{},
+			Msg:    "pass",
+		},
+		{
+			Scope: "subscriptionScopes",
+			AppID: "appid1",
+			Metadata: map[string]string{
+				"subscriptionScopes": "appid2",
+			},
+			Target: []string{},
+			Msg:    "pass",
+		},
+		{
+			Scope: "subscriptionScopes",
+			AppID: "appid1",
+			Metadata: map[string]string{
+				"subscriptionScopes": "appid1;appid2=topic2",
+			},
+			Target: []string{},
+			Msg:    "pass",
+		},
+		{
+			Scope: "subscriptionScopes",
+			AppID: "appid1",
+			Metadata: map[string]string{
+				"subscriptionScopes": "appid1=topic1;appid2",
+			},
+			Target: []string{"topic1"},
+			Msg:    "pass",
+		},
+		{
+			Scope: "subscriptionSCOPES",
+			AppID: "appid1",
+			Metadata: map[string]string{
+				"Subscriptionscopes": "appid1=topic1;appid2",
+			},
+			Target: []string{"topic1"},
+			Msg:    "pass, case-insensitive match",
 		},
 	}
 	for _, item := range scopedTests {

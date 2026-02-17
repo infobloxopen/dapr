@@ -1,7 +1,15 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package main
 
@@ -9,11 +17,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/dapr/dapr/tests/apps/utils"
 
 	"github.com/gorilla/mux"
 )
@@ -23,9 +33,8 @@ const (
 	daprV1URL            = "http://localhost:3500/v1.0"
 	actorMethodURLFormat = daprV1URL + "/actors/%s/%s/method/%s"
 
-	registedActorType       = "testactor" // Actor type must be unique per test app.
+	registeredActorType     = "testactor" // Actor type must be unique per test app.
 	actorIdleTimeout        = "5s"        // Short idle timeout.
-	actorScanInterval       = "1s"        // Smaller then actorIdleTimeout and short for speedy test.
 	drainOngoingCallTimeout = "1s"
 	drainRebalancedActors   = true
 )
@@ -47,21 +56,21 @@ type actorLogEntry struct {
 type daprConfig struct {
 	Entities                []string `json:"entities,omitempty"`
 	ActorIdleTimeout        string   `json:"actorIdleTimeout,omitempty"`
-	ActorScanInterval       string   `json:"actorScanInterval,omitempty"`
 	DrainOngoingCallTimeout string   `json:"drainOngoingCallTimeout,omitempty"`
 	DrainRebalancedActors   bool     `json:"drainRebalancedActors,omitempty"`
 }
 
 var daprConfigResponse = daprConfig{
-	[]string{registedActorType},
+	[]string{registeredActorType},
 	actorIdleTimeout,
-	actorScanInterval,
 	drainOngoingCallTimeout,
 	drainRebalancedActors,
 }
 
-var actorLogs = []actorLogEntry{}
-var actorLogsMutex = &sync.Mutex{}
+var (
+	actorLogs      = []actorLogEntry{}
+	actorLogsMutex = &sync.Mutex{}
+)
 
 var actors sync.Map
 
@@ -76,7 +85,7 @@ func getActorLogs() []actorLogEntry {
 }
 
 func createActorID(actorType string, id string) string {
-	return fmt.Sprintf("%s.%s", actorType, id)
+	return actorType + "." + id
 }
 
 // indexHandler is the handler for root path
@@ -127,13 +136,14 @@ func actorMethodHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+//nolint:forbidigo
 func deactivateActorHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Processing %s actor request for %s", r.Method, r.URL.RequestURI())
 
 	actorType := mux.Vars(r)["actorType"]
 	id := mux.Vars(r)["id"]
 
-	if actorType != registedActorType {
+	if actorType != registeredActorType {
 		log.Printf("Unknown actor type: %s", actorType)
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -146,7 +156,7 @@ func deactivateActorHandler(w http.ResponseWriter, r *http.Request) {
 	_, ok := actors.Load(actorID)
 	log.Printf("loading returned:%t\n", ok)
 
-	if ok && r.Method == "DELETE" {
+	if ok && r.Method == http.MethodDelete {
 		action = "deactivation"
 		actors.Delete(actorID)
 	}
@@ -162,7 +172,8 @@ func deactivateActorHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // calls Dapr's Actor method: simulating actor client call.
-// nolint:gosec
+//
+//nolint:gosec
 func testCallActorHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Processing %s test request for %s", r.Method, r.URL.RequestURI())
 
@@ -181,7 +192,7 @@ func testCallActorHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		log.Printf("Could not read actor's test response: %s", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
@@ -202,8 +213,11 @@ func epoch() int {
 }
 
 // appRouter initializes restful api router
-func appRouter() *mux.Router {
+func appRouter() http.Handler {
 	router := mux.NewRouter().StrictSlash(true)
+
+	// Log requests and their processing time
+	router.Use(utils.LoggerMiddleware)
 
 	router.HandleFunc("/", indexHandler).Methods("GET")
 	router.HandleFunc("/dapr/config", configHandler).Methods("GET")
@@ -220,6 +234,5 @@ func appRouter() *mux.Router {
 
 func main() {
 	log.Printf("Actor App - listening on http://localhost:%d", appPort)
-
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", appPort), appRouter()))
+	utils.StartServer(appPort, appRouter, true, false)
 }

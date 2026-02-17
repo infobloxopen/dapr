@@ -1,7 +1,15 @@
-// ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation and Dapr Contributors.
-// Licensed under the MIT License.
-// ------------------------------------------------------------
+/*
+Copyright 2021 The Dapr Authors
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package main
 
@@ -12,10 +20,10 @@ import (
 	"os"
 	"strings"
 
-	serve "actorload/cmd/stateactor/service"
-	cl "actorload/pkg/actor/client"
-	http_client "actorload/pkg/actor/client/http"
-	rt "actorload/pkg/actor/runtime"
+	serve "github.com/dapr/dapr/tests/apps/actorload/cmd/stateactor/service"
+	cl "github.com/dapr/dapr/tests/apps/actorload/pkg/actor/client"
+	httpClient "github.com/dapr/dapr/tests/apps/actorload/pkg/actor/client/http"
+	rt "github.com/dapr/dapr/tests/apps/actorload/pkg/actor/runtime"
 )
 
 const (
@@ -27,7 +35,7 @@ const (
 )
 
 var (
-	actors  = flag.String("actors", actorType, "Actor types array seperated by comma. e.g. StateActor,SaveActor")
+	actors  = flag.String("actors", actorType, "Actor types array separated by comma. e.g. StateActor,SaveActor")
 	appPort = flag.Int("p", daprAppPort, "StateActor service app port.")
 )
 
@@ -37,20 +45,20 @@ type stateActor struct {
 
 func newStateActor() *stateActor {
 	return &stateActor{
-		actorClient: http_client.NewClient(),
+		actorClient: httpClient.NewClient(),
 	}
 }
 
 func (s *stateActor) setActorState(actorType, actorID string, data []byte, metadata map[string]string) ([]byte, error) {
-	upsertReq := http_client.TransactionalStateOperation{
+	upsertReq := httpClient.TransactionalStateOperation{
 		Operation: "upsert",
-		Request: http_client.TransactionalRequest{
+		Request: httpClient.TransactionalRequest{
 			Key:   actorStateName,
 			Value: string(data),
 		},
 	}
 
-	operations := []http_client.TransactionalStateOperation{upsertReq}
+	operations := []httpClient.TransactionalStateOperation{upsertReq}
 	serialized, err := json.Marshal(operations)
 	if err != nil {
 		return nil, err
@@ -96,7 +104,6 @@ func main() {
 	service := serve.NewActorService(*appPort, &rt.DaprConfig{
 		Entities:                actorTypes,
 		ActorIdleTimeout:        "5m",
-		ActorScanInterval:       "10s",
 		DrainOngoingCallTimeout: "10s",
 		DrainRebalancedActors:   true,
 	})
