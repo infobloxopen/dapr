@@ -55,6 +55,7 @@ type Config struct {
 	TrustAnchorsFile        string `envconfig:"DAPR_TRUST_ANCHORS_FILE"`
 	ControlPlaneTrustDomain string `envconfig:"DAPR_CONTROL_PLANE_TRUST_DOMAIN"`
 	SentryAddress           string `envconfig:"DAPR_SENTRY_ADDRESS"`
+	SchedulerEnabled        bool   `envconfig:"SCHEDULER_ENABLED" default:"true"`
 
 	parsedActorsEnabled              bool
 	parsedActorsService              patcher.Service

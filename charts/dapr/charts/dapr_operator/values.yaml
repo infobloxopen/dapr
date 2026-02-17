@@ -5,11 +5,14 @@ watchNamespace: ""
 maxPodRestartsPerMinute: 20
 component: operator
 
+# Set to true to disable leader election (useful for single-replica operator deployments)
+disableLeaderElection: false
+
 # Override this to use a custom operator service image.
 # If the image name contains a "/", it is assumed to be a full docker image name, including the registry url and tag.
 # Otherwise, the helm chart will use {{ .Values.global.registry }}/{{ .Values.image.name }}:{{ .Values.global.tag }}
 image:
-  name: "operator"
+  name: "dapr-operator"
 
 nameOverride: ""
 fullnameOverride: ""

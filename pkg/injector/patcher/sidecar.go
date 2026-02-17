@@ -26,6 +26,39 @@ import (
 	kitstrings "github.com/dapr/kit/strings"
 )
 
+// Infoblox legacy annotation keys for backward compatibility
+const (
+	infobloxSidecarGRPCPort         = "com.infoblox.dapr.sidecar-grpc-port"
+	infobloxSidecarHTTPPort         = "com.infoblox.dapr.sidecar-http-port"
+	infobloxSidecarInternalGRPCPort = "com.infoblox.dapr.sidecar-internal-grpc-port"
+)
+
+// mapLegacyInfobloxAnnotations copies legacy Infoblox annotations to standard Dapr annotations
+// if the standard annotations are not already set. This provides backward compatibility
+// for applications migrating from v1.0.0-ib.
+func mapLegacyInfobloxAnnotations(an map[string]string) map[string]string {
+	if an == nil {
+		return an
+	}
+
+	// Map legacy Infoblox annotations to standard Dapr annotations (if not already set)
+	legacyMappings := map[string]string{
+		infobloxSidecarGRPCPort:         "dapr.io/grpc-port",
+		infobloxSidecarHTTPPort:         "dapr.io/http-port",
+		infobloxSidecarInternalGRPCPort: "dapr.io/internal-grpc-port",
+	}
+
+	for legacyKey, standardKey := range legacyMappings {
+		if legacyVal, hasLegacy := an[legacyKey]; hasLegacy {
+			if _, hasStandard := an[standardKey]; !hasStandard {
+				an[standardKey] = legacyVal
+			}
+		}
+	}
+
+	return an
+}
+
 // GetInjectedComponentContainersFn is a function that returns the list of component containers for a given appID and namespace.
 type GetInjectedComponentContainersFn = func(appID string, namespace string) ([]corev1.Container, error)
 
@@ -136,7 +169,9 @@ func NewSidecarConfig(pod *corev1.Pod) *SidecarConfig {
 }
 
 func (c *SidecarConfig) SetFromPodAnnotations() {
-	c.setFromAnnotations(c.pod.Annotations)
+	// INFOBLOX: Map legacy annotations for backward compatibility
+	annotations := mapLegacyInfobloxAnnotations(c.pod.Annotations)
+	c.setFromAnnotations(annotations)
 }
 
 func (c *SidecarConfig) setDefaultValues() {

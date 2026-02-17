@@ -104,12 +104,7 @@ export DOCKER_CLI_EXPERIMENTAL=enabled
 
 # check the required environment variables
 check-docker-env:
-ifeq ($(DAPR_REGISTRY),)
-	$(error DAPR_REGISTRY environment variable must be set)
-endif
-ifeq ($(DAPR_TAG),)
-	$(error DAPR_TAG environment variable must be set)
-endif
+        @echo "Using DAPR_REGISTRY=$(DAPR_REGISTRY) DAPR_TAG=$(DAPR_TAG)"
 
 check-arch:
 ifeq ($(TARGET_OS),)
