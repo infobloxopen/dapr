@@ -9,7 +9,7 @@ component: scheduler
 # If the image name contains a "/", it is assumed to be a full docker image name, including the registry url and tag.
 # Otherwise, the helm chart will use {{ .Values.global.registry }}/{{ .Values.image.name }}:{{ .Values.global.tag }}
 image:
-  name: "scheduler"
+  name: "dapr-scheduler"
 
 nameOverride: ""
 fullnameOverride: ""

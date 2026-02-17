@@ -192,6 +192,10 @@ spec:
           value: {{ .Values.ignoreEntrypointTolerations | toYaml }}
 {{- end }}
 
+        # Configuration for scheduler
+        - name: SCHEDULER_ENABLED
+          value: {{ .Values.global.scheduler.enabled | toString | toYaml }}
+
         # Configuration for actors and reminders
         - name: ACTORS_ENABLED
           value: {{ .Values.global.actors.enabled | toString | toYaml }}
