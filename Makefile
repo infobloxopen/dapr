@@ -51,11 +51,13 @@ PROTOBUF_SUITE_VERSION = 34.1
 
 # name of protoc-gen-go when protoc-gen-go --version is run.
 PROTOC_GEN_GO_NAME = "protoc-gen-go"
-ifdef REL_VERSION
-	DAPR_VERSION := $(REL_VERSION)
-else
-	DAPR_VERSION := edge
-endif
+
+GIT_COMMIT_NUMBER = $(shell git rev-parse --short HEAD)
+DAPR_VERSION = v1.16.6-ib-$(GIT_COMMIT_NUMBER)
+DAPR_REGISTRY ?= infoblox
+DAPR_TAG ?= $(DAPR_VERSION)
+TARGET_OS ?= linux
+TARGET_ARCH ?= amd64
 
 LOCAL_ARCH := $(shell uname -m)
 ifeq ($(LOCAL_ARCH),x86_64)
@@ -601,3 +603,68 @@ include docker/docker.mk
 # Target: tests                                                                #
 ################################################################################
 include tests/dapr_tests.mk
+
+
+# release target: build and archive
+.PHONY: release
+release: build archive
+
+# tidy target for go mod tidy
+.PHONY: tidy
+tidy:
+	go mod tidy
+
+# clean target for docker images
+.PHONY: clean
+clean:
+	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/dapr:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/daprd:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/placement:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/sentry:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/operator:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/injector:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/scheduler:$(DAPR_TAG)) 2>/dev/null || true
+
+################################################################################
+# Target: dev-docker-build, dev-docker-push                                    #
+# Build and push images to Harbor dev registry                                 #
+################################################################################
+DEV_REGISTRY ?= harbor.services.sdp.infoblox.com/infobloxcto-dev
+DEV_TAG ?= $(DAPR_VERSION)
+DEV_TARGET_ARCH ?= amd64
+DEV_BIN_PATH = $(OUT_DIR)/linux_$(DEV_TARGET_ARCH)/release
+
+# Dev build linux binaries for target architecture (default: amd64)
+.PHONY: dev-build-linux
+dev-build-linux:
+	$(info Building linux binaries for $(DEV_TARGET_ARCH)...)
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/daprd ./cmd/daprd/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/placement ./cmd/placement/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/operator ./cmd/operator/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/injector ./cmd/injector/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/sentry ./cmd/sentry/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/scheduler ./cmd/scheduler/
+
+# Dev docker build - builds amd64 images for Harbor dev registry
+.PHONY: dev-docker-build
+dev-docker-build: dev-build-linux
+	$(info Building dev images for $(DEV_REGISTRY) (linux/$(DEV_TARGET_ARCH))...)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=* -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-dapr:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=daprd -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-daprd:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=placement -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-placement:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=sentry -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-sentry:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=operator -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-operator:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=injector -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-injector:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=scheduler -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-scheduler:$(DEV_TAG)
+
+# Dev docker push - pushes images to Harbor dev registry
+.PHONY: dev-docker-push
+dev-docker-push: dev-docker-build
+	$(info Pushing dev images to $(DEV_REGISTRY)...)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr-dapr:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr-daprd:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr-placement:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr-sentry:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr-operator:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr-injector:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr-scheduler:$(DEV_TAG)
