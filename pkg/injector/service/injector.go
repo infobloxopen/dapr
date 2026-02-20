@@ -234,29 +234,34 @@ func (i *injector) Run(ctx context.Context, tlsConfig *tls.Config, sentryID spif
 	i.currentTrustAnchors = currentTrustAnchors
 	i.sentrySPIFFEID = sentryID
 
-	for {
-		var sched *appsv1.StatefulSet
-		sched, err := i.kubeClient.AppsV1().StatefulSets(i.controlPlaneNamespace).Get(ctx, "dapr-scheduler-server", metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			log.Warnf("%s/dapr-scheduler-server StatefulSet not found, retrying in 5 seconds", i.controlPlaneNamespace)
-			select {
-			case <-time.After(5 * time.Second):
-				continue
-			case <-ctx.Done():
-				return fmt.Errorf("%s/dapr-scheduler-server StatefulSet not found", i.controlPlaneNamespace)
+	if i.config.SchedulerEnabled {
+		for {
+			var sched *appsv1.StatefulSet
+			sched, err := i.kubeClient.AppsV1().StatefulSets(i.controlPlaneNamespace).Get(ctx, "dapr-scheduler-server", metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				log.Warnf("%s/dapr-scheduler-server StatefulSet not found, retrying in 5 seconds", i.controlPlaneNamespace)
+				select {
+				case <-time.After(5 * time.Second):
+					continue
+				case <-ctx.Done():
+					return fmt.Errorf("%s/dapr-scheduler-server StatefulSet not found", i.controlPlaneNamespace)
+				}
 			}
-		}
 
-		if err != nil {
-			return fmt.Errorf("error getting dapr-scheduler-server StatefulSet: %w", err)
-		}
+			if err != nil {
+				return fmt.Errorf("error getting dapr-scheduler-server StatefulSet: %w", err)
+			}
 
-		if sched.Spec.Replicas == nil {
-			return errors.New("dapr-scheduler-server StatefulSet has no replicas")
-		}
+			if sched.Spec.Replicas == nil {
+				return errors.New("dapr-scheduler-server StatefulSet has no replicas")
+			}
 
-		i.schedulerReplicaCount = int(*sched.Spec.Replicas)
-		break
+			i.schedulerReplicaCount = int(*sched.Spec.Replicas)
+			break
+		}
+	} else {
+		log.Info("Scheduler is disabled, skipping scheduler StatefulSet lookup")
+		i.schedulerReplicaCount = 0
 	}
 
 	if i.schedulerReplicaCount > 0 {
