@@ -58,7 +58,6 @@ PROTOC_GEN_GO_NAME = "protoc-gen-go"
 GIT_COMMIT_NUMBER = $(shell git rev-parse --short HEAD)
 DAPR_VERSION = v1.16.6-ib-$(GIT_COMMIT_NUMBER)
 REPO         := infoblox
-DAPR_REGISTRY ?=
 DAPR_TAG ?= $(DAPR_VERSION)
 TARGET_OS ?= linux
 TARGET_ARCH ?= amd64
