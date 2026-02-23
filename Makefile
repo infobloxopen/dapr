@@ -611,6 +611,11 @@ release: build archive
 tidy:
 	go mod tidy
 
+# show-images target for finalizeBuild
+.PHONY: show-images
+show-images:
+	@echo "$(REPO)/dapr:$(DAPR_TAG) $(REPO)/daprd:$(DAPR_TAG) $(REPO)/placement:$(DAPR_TAG) $(REPO)/sentry:$(DAPR_TAG) $(REPO)/operator:$(DAPR_TAG) $(REPO)/injector:$(DAPR_TAG) $(REPO)/scheduler:$(DAPR_TAG)"
+
 # clean target for docker images
 .PHONY: clean
 clean:
