@@ -621,13 +621,13 @@ tidy:
 # clean target for docker images
 .PHONY: clean
 clean:
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/dapr:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/daprd:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/placement:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/sentry:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/operator:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/injector:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/scheduler:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/dapr:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/daprd:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/placement:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/sentry:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/operator:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/injector:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/scheduler:$(DAPR_TAG)) 2>/dev/null || true
 
 ################################################################################
 # Target: dev-docker-build, dev-docker-push                                    #
