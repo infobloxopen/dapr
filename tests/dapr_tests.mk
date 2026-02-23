@@ -13,6 +13,10 @@
 
 # E2E test app list (folder name)
 # e.g. E2E_TEST_APPS=hellodapr state service_invocation
+
+# $(GOTESTSUM) binary path
+GOTESTSUM ?= $(shell go env GOPATH)/bin/gotestsum
+
 E2E_TEST_APPS=actorjava \
 actordotnet \
 actorpython \
@@ -337,7 +341,7 @@ push-kind-perf-app-all: $(PUSH_KIND_PERF_APPS_TARGETS)
 .PHONY: test-deps
 test-deps:
 	# The desire here is to download this test dependency without polluting go.mod
-	command -v gotestsum || go install gotest.tools/gotestsum@latest
+	command -v $(GOTESTSUM) || go install gotest.tools/gotestsum@latest
 
 # start all e2e tests
 test-e2e-all: check-e2e-env test-deps
@@ -347,10 +351,10 @@ test-e2e-all: check-e2e-env test-deps
 	# test
 	# Note2: use env variable DAPR_E2E_TEST to pick one e2e test to run.
      ifeq ($(DAPR_E2E_TEST),)
-	DAPR_CONTAINER_LOG_PATH=$(DAPR_CONTAINER_LOG_PATH) DAPR_TEST_LOG_PATH=$(DAPR_TEST_LOG_PATH) GOOS=$(TARGET_OS_LOCAL) DAPR_TEST_NAMESPACE=$(DAPR_TEST_NAMESPACE) DAPR_TEST_TAG=$(DAPR_TEST_TAG) DAPR_TEST_REGISTRY=$(DAPR_TEST_REGISTRY) DAPR_TEST_MINIKUBE_IP=$(MINIKUBE_NODE_IP) gotestsum --jsonfile $(TEST_OUTPUT_FILE_PREFIX)_e2e.json --junitfile $(TEST_OUTPUT_FILE_PREFIX)_e2e.xml --format standard-quiet -- -timeout 20m -p 2 -count=1 -v -tags=e2e ./tests/e2e/$(DAPR_E2E_TEST)/...
+	DAPR_CONTAINER_LOG_PATH=$(DAPR_CONTAINER_LOG_PATH) DAPR_TEST_LOG_PATH=$(DAPR_TEST_LOG_PATH) GOOS=$(TARGET_OS_LOCAL) DAPR_TEST_NAMESPACE=$(DAPR_TEST_NAMESPACE) DAPR_TEST_TAG=$(DAPR_TEST_TAG) DAPR_TEST_REGISTRY=$(DAPR_TEST_REGISTRY) DAPR_TEST_MINIKUBE_IP=$(MINIKUBE_NODE_IP) $(GOTESTSUM) --jsonfile $(TEST_OUTPUT_FILE_PREFIX)_e2e.json --junitfile $(TEST_OUTPUT_FILE_PREFIX)_e2e.xml --format standard-quiet -- -timeout 20m -p 2 -count=1 -v -tags=e2e ./tests/e2e/$(DAPR_E2E_TEST)/...
      else
 	for app in $(DAPR_E2E_TEST); do \
-		DAPR_CONTAINER_LOG_PATH=$(DAPR_CONTAINER_LOG_PATH) DAPR_TEST_LOG_PATH=$(DAPR_TEST_LOG_PATH) GOOS=$(TARGET_OS_LOCAL) DAPR_TEST_NAMESPACE=$(DAPR_TEST_NAMESPACE) DAPR_TEST_TAG=$(DAPR_TEST_TAG) DAPR_TEST_REGISTRY=$(DAPR_TEST_REGISTRY) DAPR_TEST_MINIKUBE_IP=$(MINIKUBE_NODE_IP) gotestsum --jsonfile $(TEST_OUTPUT_FILE_PREFIX)_e2e.json --junitfile $(TEST_OUTPUT_FILE_PREFIX)_e2e.xml --format standard-quiet -- -timeout 20m -p 2 -count=1 -v -tags=e2e ./tests/e2e/$$app/...; \
+		DAPR_CONTAINER_LOG_PATH=$(DAPR_CONTAINER_LOG_PATH) DAPR_TEST_LOG_PATH=$(DAPR_TEST_LOG_PATH) GOOS=$(TARGET_OS_LOCAL) DAPR_TEST_NAMESPACE=$(DAPR_TEST_NAMESPACE) DAPR_TEST_TAG=$(DAPR_TEST_TAG) DAPR_TEST_REGISTRY=$(DAPR_TEST_REGISTRY) DAPR_TEST_MINIKUBE_IP=$(MINIKUBE_NODE_IP) $(GOTESTSUM) --jsonfile $(TEST_OUTPUT_FILE_PREFIX)_e2e.json --junitfile $(TEST_OUTPUT_FILE_PREFIX)_e2e.xml --format standard-quiet -- -timeout 20m -p 2 -count=1 -v -tags=e2e ./tests/e2e/$$app/...; \
 	done
      endif
 
@@ -365,7 +369,7 @@ test-perf-$(1): check-e2e-env test-deps
 	DAPR_TEST_REGISTRY=$(DAPR_TEST_REGISTRY) \
 	DAPR_TEST_MINIKUBE_IP=$(MINIKUBE_NODE_IP) \
 	NO_API_LOGGING=true \
-		gotestsum \
+		$(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_perf_$(1).json \
 			--junitfile $(TEST_OUTPUT_FILE_PREFIX)_perf_$(1).xml \
 			--format standard-quiet \
@@ -391,7 +395,7 @@ ifeq ($(DAPR_PERF_TEST),)
 	DAPR_TEST_REGISTRY=$(DAPR_TEST_REGISTRY) \
 	DAPR_TEST_MINIKUBE_IP=$(MINIKUBE_NODE_IP) \
 	NO_API_LOGGING=true \
-		gotestsum \
+		$(GOTESTSUM) \
 		--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_perf.json \
 		--junitfile $(TEST_OUTPUT_FILE_PREFIX)_perf.xml \
 		--format standard-quiet \
@@ -408,7 +412,7 @@ else
 		DAPR_TEST_REGISTRY=$(DAPR_TEST_REGISTRY) \
 		DAPR_TEST_MINIKUBE_IP=$(MINIKUBE_NODE_IP) \
 		NO_API_LOGGING=true \
-			gotestsum \
+			$(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_perf.json \
 			--junitfile $(TEST_OUTPUT_FILE_PREFIX)_perf.xml \
 			--format standard-quiet \
@@ -428,7 +432,7 @@ test-perf-pubsub-subscribe-http-components: check-e2e-env test-deps
 	DAPR_TEST_MINIKUBE_IP=$(MINIKUBE_NODE_IP) \
 	DAPR_PERF_PUBSUB_SUBS_HTTP_TEST_CONFIG_FILE_NAME=$(DAPR_PERF_PUBSUB_SUBS_HTTP_TEST_CONFIG_FILE_NAME) \
 	NO_API_LOGGING=true \
-		gotestsum \
+		$(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_perf_$(1).json \
 			--junitfile $(TEST_OUTPUT_FILE_PREFIX)_perf_$(1).xml \
 			--format standard-quiet \

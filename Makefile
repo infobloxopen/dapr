@@ -44,6 +44,9 @@ LATEST_RELEASE ?=
 
 PROTOC ?=protoc
 
+# gotestsum binary path
+GOTESTSUM ?= $(shell go env GOPATH)/bin/gotestsum
+
 # Version of "protoc" to use
 # We must also specify a protobuf "suite" version from https://github.com/protocolbuffers/protobuf/releases
 PROTOC_VERSION = 25.4
@@ -322,7 +325,7 @@ release-flavor: build archive-flavor
 .PHONY: test
 test: test-deps
 	CGO_ENABLED=$(CGO) \
-		gotestsum \
+		$(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_unit.json \
 			--format pkgname-and-test-fails \
 			-- \
@@ -392,7 +395,7 @@ endif
 
 .PHONY: test-integration
 test-integration: test-deps
-		CGO_ENABLED=1 gotestsum \
+		CGO_ENABLED=1 $(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_integration.json \
 			--format testname \
 			-- \
@@ -400,7 +403,7 @@ test-integration: test-deps
 
 .PHONY: test-integration-parallel
 test-integration-parallel: test-deps
-		CGO_ENABLED=1 gotestsum \
+		CGO_ENABLED=1 $(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_integration.json \
 			--format testname \
 			-- \
