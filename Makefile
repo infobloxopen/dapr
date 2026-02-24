@@ -44,6 +44,9 @@ LATEST_RELEASE ?=
 
 PROTOC ?=protoc
 
+# gotestsum binary path
+GOTESTSUM ?= $(shell go env GOPATH)/bin/gotestsum
+
 # Version of "protoc" to use
 # We must also specify a protobuf "suite" version from https://github.com/protocolbuffers/protobuf/releases
 PROTOC_VERSION = 25.4
@@ -54,7 +57,7 @@ PROTOC_GEN_GO_NAME = "protoc-gen-go"
 
 GIT_COMMIT_NUMBER = $(shell git rev-parse --short HEAD)
 DAPR_VERSION = v1.16.6-ib-$(GIT_COMMIT_NUMBER)
-DAPR_REGISTRY ?= infoblox
+REPO         := infoblox
 DAPR_TAG ?= $(DAPR_VERSION)
 TARGET_OS ?= linux
 TARGET_ARCH ?= amd64
@@ -322,7 +325,7 @@ release-flavor: build archive-flavor
 .PHONY: test
 test: test-deps
 	CGO_ENABLED=$(CGO) \
-		gotestsum \
+		$(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_unit.json \
 			--format pkgname-and-test-fails \
 			-- \
@@ -392,7 +395,7 @@ endif
 
 .PHONY: test-integration
 test-integration: test-deps
-		CGO_ENABLED=1 gotestsum \
+		CGO_ENABLED=1 $(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_integration.json \
 			--format testname \
 			-- \
@@ -400,7 +403,7 @@ test-integration: test-deps
 
 .PHONY: test-integration-parallel
 test-integration-parallel: test-deps
-		CGO_ENABLED=1 gotestsum \
+		CGO_ENABLED=1 $(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_integration.json \
 			--format testname \
 			-- \
@@ -608,16 +611,21 @@ release: build archive
 tidy:
 	go mod tidy
 
+# show-images target for finalizeBuild
+.PHONY: show-images
+show-images:
+	@echo "$(REPO)/dapr:$(DAPR_TAG) $(REPO)/daprd:$(DAPR_TAG) $(REPO)/placement:$(DAPR_TAG) $(REPO)/sentry:$(DAPR_TAG) $(REPO)/operator:$(DAPR_TAG) $(REPO)/injector:$(DAPR_TAG) $(REPO)/scheduler:$(DAPR_TAG)"
+
 # clean target for docker images
 .PHONY: clean
 clean:
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/dapr:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/daprd:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/placement:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/sentry:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/operator:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/injector:$(DAPR_TAG)) 2>/dev/null || true
-	-$(DOCKER) rmi -f $$(docker images -q $(DAPR_REGISTRY)/scheduler:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/dapr:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/daprd:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/placement:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/sentry:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/operator:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/injector:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/scheduler:$(DAPR_TAG)) 2>/dev/null || true
 
 ################################################################################
 # Target: dev-docker-build, dev-docker-push                                    #
