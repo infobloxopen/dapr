@@ -39,6 +39,8 @@ global:
     enabled: true
     workloadCertTTL: 24h
     allowedClockSkew: 15m
+    # Root CA and issuer certificate TTL. Default: 438000h (50 years).
+    caCertTTL: "438000h"
     controlPlaneTrustDomain: "cluster.local"
     # If set to true, a bound service account token will be mounted and used to
     # authenticate to Sentry.

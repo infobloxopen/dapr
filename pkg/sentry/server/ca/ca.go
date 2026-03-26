@@ -135,7 +135,7 @@ func New(ctx context.Context, conf config.Config) (Signer, error) {
 			X509RootKey:      x509RootKey,
 			TrustDomain:      conf.TrustDomain,
 			AllowedClockSkew: conf.AllowedClockSkew,
-			OverrideCATTL:    nil,
+			OverrideCATTL:    conf.CACertTTL,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate CA bundle: %w", err)

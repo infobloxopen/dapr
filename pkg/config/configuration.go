@@ -401,6 +401,7 @@ type MTLSSpec struct {
 	Enabled                 bool   `json:"enabled,omitempty"                 yaml:"enabled,omitempty"`
 	WorkloadCertTTL         string `json:"workloadCertTTL,omitempty"         yaml:"workloadCertTTL,omitempty"`
 	AllowedClockSkew        string `json:"allowedClockSkew,omitempty"        yaml:"allowedClockSkew,omitempty"`
+	CACertTTL               string `json:"caCertTTL,omitempty"               yaml:"caCertTTL,omitempty"`
 	SentryAddress           string `json:"sentryAddress,omitempty"           yaml:"sentryAddress,omitempty"`
 	ControlPlaneTrustDomain string `json:"controlPlaneTrustDomain,omitempty" yaml:"controlPlaneTrustDomain,omitempty"`
 	// Additional token validators to use.

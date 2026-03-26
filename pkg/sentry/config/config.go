@@ -72,6 +72,7 @@ type Config struct {
 	CAStore          string
 	WorkloadCertTTL  time.Duration
 	AllowedClockSkew time.Duration
+	CACertTTL        *time.Duration
 	RootCertPath     string
 	IssuerCertPath   string
 	IssuerKeyPath    string
@@ -208,6 +209,15 @@ func parseConfiguration(conf Config, daprConfig *daprGlobalConfig.Configuration)
 		}
 
 		conf.AllowedClockSkew = d
+	}
+
+	if mtlsSpec != nil && mtlsSpec.CACertTTL != "" {
+		d, err := time.ParseDuration(mtlsSpec.CACertTTL)
+		if err != nil {
+			return conf, fmt.Errorf("error parsing CACertTTL duration: %w", err)
+		}
+
+		conf.CACertTTL = &d
 	}
 
 	if daprConfig.Spec.MTLSSpec != nil && len(daprConfig.Spec.MTLSSpec.ControlPlaneTrustDomain) > 0 {

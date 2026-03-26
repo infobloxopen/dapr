@@ -45,6 +45,7 @@ type Options struct {
 	HealthzListenAddress  string
 	IssuerCredentialsPath string
 	TrustDomain           string
+	CACertTTL             time.Duration
 	Kubeconfig            string
 	Logger                logger.Options
 	Metrics               *metrics.FlagOptions
@@ -127,6 +128,7 @@ func New(origArgs []string) *Options {
 	fs.IntVar(&opts.HealthzPort, "healthz-port", 8080, "The port for the healthz server to listen on")
 	fs.StringVar(&opts.HealthzListenAddress, "healthz-listen-address", "", "The listening address for the healthz server")
 	fs.StringVar(&opts.Mode, "mode", string(modes.StandaloneMode), "Runtime mode for Dapr Sentry")
+	fs.DurationVar(&opts.CACertTTL, "ca-cert-ttl", 0, "Time-to-live for the root CA and issuer certificates (code default: 1 year). Set to 0 to use the default.")
 	fs.BoolVar(&opts.JWT.Enabled, "jwt-enabled", false, "Enable JWT token issuance by Sentry")
 	fs.StringVar(&opts.JWT.SigningKeyFilename, "jwt-key-filename", config.DefaultJWTSigningKeyFilename, "JWT signing key filename")
 	fs.StringVar(&opts.JWT.JWKSFilename, "jwks-filename", config.DefaultJWKSFilename, "JWKS (JSON Web Key Set) filename")

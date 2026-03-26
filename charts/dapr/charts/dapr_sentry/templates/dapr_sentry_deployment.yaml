@@ -185,6 +185,10 @@ spec:
 {{- end }}
         - "--trust-domain"
         - {{ .Values.global.mtls.controlPlaneTrustDomain }}
+{{- if .Values.global.mtls.caCertTTL }}
+        - "--ca-cert-ttl"
+        - "{{ .Values.global.mtls.caCertTTL }}"
+{{- end }}
 {{- with .Values.global.issuerFilenames }}
         - "--issuer-ca-filename"
         - "{{ .ca }}"

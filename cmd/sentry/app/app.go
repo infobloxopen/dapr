@@ -140,6 +140,11 @@ func Run() {
 	cfg.ListenAddress = opts.ListenAddress
 	cfg.Mode = modes.DaprMode(opts.Mode)
 
+	if opts.CACertTTL > 0 {
+		caCertTTL := opts.CACertTTL
+		cfg.CACertTTL = &caCertTTL
+	}
+
 	if opts.JWT.Issuer != nil {
 		cfg.JWT.Issuer = opts.JWT.Issuer
 	}
