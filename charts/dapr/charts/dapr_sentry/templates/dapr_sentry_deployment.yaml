@@ -1,3 +1,4 @@
+{{- if .Values.global.mtls.enabled }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -14,7 +15,9 @@ data:
   issuer.key: {{ b64enc .Values.tls.issuer.keyPEM | trim }}
   ca.crt: {{ b64enc .Values.tls.root.certPEM | trim }}
 {{ end }}
+{{- end }}
 ---
+{{- if .Values.global.mtls.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -29,7 +32,9 @@ metadata:
 data:
   ca.crt: {{- .Values.tls.root.certPEM | toYaml | indent 1}}
 {{end}}
+{{- end }}
 ---
+{{- if .Values.global.mtls.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -285,4 +290,5 @@ spec:
 {{- if .Values.global.priorityClassName }}
       priorityClassName:
 {{ toYaml .Values.global.priorityClassName | indent 8 }}
+{{- end }}
 {{- end }}

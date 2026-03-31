@@ -49,8 +49,15 @@ func (i *injector) getPodPatchOperations(ctx context.Context, ar *admissionv1.Ad
 	)
 
 	// Keep DNS resolution outside of GetSidecarContainer for unit testing.
-	sentryAddress := patcher.ServiceSentry.Address(i.config.Namespace, i.config.KubeClusterDomain)
 	operatorAddress := patcher.ServiceAPI.Address(i.config.Namespace, i.config.KubeClusterDomain)
+
+	mtlsEnabled := mTLSEnabled(i.controlPlaneNamespace, i.daprClient)
+
+	// Only resolve sentry address and trust anchors when mTLS is enabled.
+	var sentryAddress string
+	if mtlsEnabled {
+		sentryAddress = patcher.ServiceSentry.Address(i.config.Namespace, i.config.KubeClusterDomain)
+	}
 
 	trustAnchors, err := i.currentTrustAnchors(ctx)
 	if err != nil {
@@ -62,7 +69,7 @@ func (i *injector) getPodPatchOperations(ctx context.Context, ar *admissionv1.Ad
 	sidecar.GetInjectedComponentContainers = i.getInjectedComponentContainers
 	sidecar.Mode = injectorConsts.ModeKubernetes
 	sidecar.Namespace = ar.Request.Namespace
-	sidecar.MTLSEnabled = mTLSEnabled(i.controlPlaneNamespace, i.daprClient)
+	sidecar.MTLSEnabled = mtlsEnabled
 	sidecar.Identity = ar.Request.Namespace + ":" + pod.Spec.ServiceAccountName
 	sidecar.IgnoreEntrypointTolerations = i.config.GetIgnoreEntrypointTolerations()
 	sidecar.ImagePullPolicy = i.config.GetPullPolicy()

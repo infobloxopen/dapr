@@ -18,7 +18,9 @@ import (
 	"encoding/base64"
 	"math"
 	"os"
+	"time"
 
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -106,12 +108,28 @@ func Run() {
 		ControlPlaneNamespace:   namespace,
 		TrustAnchorsFile:        &cfg.TrustAnchorsFile,
 		AppID:                   "dapr-injector",
-		MTLSEnabled:             true,
+		MTLSEnabled:             opts.EnableMTLS,
 		Mode:                    modes.KubernetesMode,
 		Healthz:                 healthz,
 	})
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// When mTLS is disabled (no sentry), generate self-signed certs for webhooks.
+	var selfSignedCert *security.SelfSignedCert
+	if !opts.EnableMTLS {
+		dnsNames := []string{
+			"dapr-sidecar-injector",
+			"dapr-sidecar-injector." + namespace,
+			"dapr-sidecar-injector." + namespace + ".svc",
+			"dapr-sidecar-injector." + namespace + ".svc.cluster.local",
+		}
+		selfSignedCert, err = security.GenerateSelfSignedCert(dnsNames, 50*365*24*time.Hour)
+		if err != nil {
+			log.Fatalf("Error generating self-signed cert: %v", err)
+		}
+		log.Info("Generated self-signed certificates for injector webhook (sentry disabled)")
 	}
 
 	inj, err := service.NewInjector(service.Options{
@@ -145,8 +163,18 @@ func Run() {
 			if rerr != nil {
 				return rerr
 			}
+
+			if selfSignedCert != nil {
+				// mTLS disabled: use self-signed TLS, no sentry ID, empty trust anchors
+				return inj.Run(ctx,
+					selfSignedCert.TLSConfig,
+					spiffeid.ID{},
+					func(ctx context.Context) ([]byte, error) { return nil, nil },
+				)
+			}
+
 			sentryID, rerr := security.SentryID(sec.ControlPlaneTrustDomain(), security.CurrentNamespace())
-			if err != nil {
+			if rerr != nil {
 				return rerr
 			}
 			return inj.Run(ctx,
@@ -156,6 +184,11 @@ func Run() {
 			)
 		},
 		func(ctx context.Context) error {
+			// When sentry is disabled, trust anchors come from self-signed cert
+			if selfSignedCert != nil {
+				<-ctx.Done()
+				return nil
+			}
 			sec, rerr := secProvider.Handler(ctx)
 			if rerr != nil {
 				return rerr
@@ -166,28 +199,34 @@ func Run() {
 		// Watch for changes to the trust anchors and update the webhook
 		// configuration on events.
 		func(ctx context.Context) error {
-			sec, rerr := secProvider.Handler(ctx)
-			if rerr != nil {
-				return rerr
-			}
+			var caBundle []byte
+			if selfSignedCert != nil {
+				// Use self-signed CA for webhook caBundle
+				caBundle = selfSignedCert.CAPem
+			} else {
+				sec, rerr := secProvider.Handler(ctx)
+				if rerr != nil {
+					return rerr
+				}
 
-			caBundle, rErr := sec.CurrentTrustAnchors(ctx)
-			if rErr != nil {
-				return rErr
+				var tErr error
+				caBundle, tErr = sec.CurrentTrustAnchors(ctx)
+				if tErr != nil {
+					return tErr
+				}
 			}
 
 			// Patch the mutating webhook configuration with the current trust
 			// anchors.
 			// Re-patch every time the trust anchors change.
 			for {
-				_, rErr = kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Patch(ctx,
+				if _, pErr := kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Patch(ctx,
 					"dapr-sidecar-injector",
 					types.JSONPatchType,
 					[]byte(`[{"op":"replace","path":"/webhooks/0/clientConfig/caBundle","value":"`+base64.StdEncoding.EncodeToString(caBundle)+`"}]`),
 					metav1.PatchOptions{},
-				)
-				if rErr != nil {
-					return rErr
+				); pErr != nil {
+					return pErr
 				}
 
 				webConfHealthTarget.Ready()

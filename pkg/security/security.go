@@ -183,12 +183,12 @@ func New(ctx context.Context, opts Options) (Provider, error) {
 		return nil, fmt.Errorf("invalid control plane trust domain: %w", err)
 	}
 
-	// Always request certificates from Sentry if mTLS is enabled or running in
-	// Kubernetes. In Kubernetes, Daprd always communicates mTLS with the control
-	// plane.
+	// Request certificates from Sentry only if mTLS is enabled.
+	// When mTLS is disabled (e.g., sentry is not deployed), components use
+	// self-signed certificates for webhook TLS and insecure gRPC connections.
 	var spf *spiffe.SPIFFE
 	var trustAnchors trustanchors.Interface
-	if opts.MTLSEnabled || opts.Mode == modes.KubernetesMode {
+	if opts.MTLSEnabled {
 		trustAnchors = opts.OverrideTrustAnchors
 		if trustAnchors == nil {
 			if len(opts.TrustAnchors) > 0 && opts.TrustAnchorsFile != nil {
@@ -384,7 +384,12 @@ func (s *security) CurrentTrustAnchors(ctx context.Context) ([]byte, error) {
 // WatchTrustAnchors watches for changes to the trust domains and returns the
 // PEM encoded trust domain roots.
 // Returns when the given context is canceled.
+// No-op if trust anchors are not initialized (sentry disabled).
 func (s *security) WatchTrustAnchors(ctx context.Context, trustAnchors chan<- []byte) {
+	if s.trustAnchors == nil {
+		<-ctx.Done()
+		return
+	}
 	s.trustAnchors.Watch(ctx, trustAnchors)
 }
 
@@ -401,7 +406,11 @@ func (s *security) ControlPlaneNamespace() string {
 // TLSServerConfigNoClientAuth returns a TLS server config which instruments
 // using the current signed server certificate. Authorizes client certificate
 // chains against the trust anchors.
+// Returns nil if spiffe/sentry is not initialized (mTLS disabled).
 func (s *security) TLSServerConfigNoClientAuth() *tls.Config {
+	if s.spiffe == nil {
+		return nil
+	}
 	return tlsconfig.TLSServerConfig(s.spiffe.X509SVIDSource())
 }
 

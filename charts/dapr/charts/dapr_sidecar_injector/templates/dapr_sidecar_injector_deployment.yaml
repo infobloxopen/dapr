@@ -125,6 +125,9 @@ spec:
 {{- end }}
         - "--healthz-port"
         - {{ .Values.healthzPort | toString | toYaml }}
+{{- if not .Values.global.mtls.enabled }}
+        - "--enable-mtls=false"
+{{- end }}
         env:
         - name: DAPR_TRUST_ANCHORS_FILE
           value: /var/run/secrets/dapr.io/tls/ca.crt
@@ -229,9 +232,11 @@ spec:
         resources:
 {{ toYaml .Values.resources | indent 10 }}
         volumeMounts:
+      {{- if .Values.global.mtls.enabled }}
         - name: dapr-trust-bundle
           mountPath: /var/run/secrets/dapr.io/tls
           readOnly: true
+      {{- end }}
       {{- if .Values.global.mtls.mountSentryVolume }}
         - name: dapr-identity-token
           mountPath: /var/run/secrets/dapr.io/sentrytoken
@@ -241,9 +246,11 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
+    {{- if .Values.global.mtls.enabled }}
       - name: dapr-trust-bundle
         configMap:
           name: dapr-trust-bundle
+    {{- end }}
     {{- if .Values.global.mtls.mountSentryVolume }}
       - name: dapr-identity-token
         projected:
