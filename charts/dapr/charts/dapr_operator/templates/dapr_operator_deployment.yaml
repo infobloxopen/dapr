@@ -114,6 +114,11 @@ spec:
           mountPath: /var/run/secrets/dapr.io/tls
           readOnly: true
       {{- end }}
+      {{- if not .Values.global.mtls.enabled }}
+        - name: dapr-operator-cert
+          mountPath: /tmp/k8s-webhook-server/serving-certs
+          readOnly: true
+      {{- end }}
       {{- if .Values.global.mtls.mountSentryVolume }}
         - name: dapr-identity-token
           mountPath: /var/run/secrets/dapr.io/sentrytoken
@@ -193,6 +198,11 @@ spec:
         - name: dapr-trust-bundle
           configMap:
             name: dapr-trust-bundle
+    {{- end }}
+    {{- if not .Values.global.mtls.enabled }}
+        - name: dapr-operator-cert
+          secret:
+            secretName: dapr-operator-cert
     {{- end }}
     {{- if .Values.global.mtls.mountSentryVolume }}
         - name: dapr-identity-token

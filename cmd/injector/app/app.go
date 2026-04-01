@@ -15,10 +15,10 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"math"
 	"os"
-	"time"
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -116,20 +116,18 @@ func Run() {
 		log.Fatal(err)
 	}
 
-	// When mTLS is disabled (no sentry), generate self-signed certs for webhooks.
-	var selfSignedCert *security.SelfSignedCert
+	// When mTLS is disabled (no sentry), load Helm-generated certs for webhooks.
+	var helmTLSConfig *tls.Config
 	if !opts.EnableMTLS {
-		dnsNames := []string{
-			"dapr-sidecar-injector",
-			"dapr-sidecar-injector." + namespace,
-			"dapr-sidecar-injector." + namespace + ".svc",
-			"dapr-sidecar-injector." + namespace + ".svc.cluster.local",
+		cert, loadErr := tls.LoadX509KeyPair("/dapr/cert/tls.crt", "/dapr/cert/tls.key")
+		if loadErr != nil {
+			log.Fatalf("Error loading webhook TLS certificates: %v", loadErr)
 		}
-		selfSignedCert, err = security.GenerateSelfSignedCert(dnsNames, 50*365*24*time.Hour)
-		if err != nil {
-			log.Fatalf("Error generating self-signed cert: %v", err)
+		helmTLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
 		}
-		log.Info("Generated self-signed certificates for injector webhook (sentry disabled)")
+		log.Info("Loaded Helm-generated certificates for injector webhook (sentry disabled)")
 	}
 
 	inj, err := service.NewInjector(service.Options{
@@ -164,10 +162,10 @@ func Run() {
 				return rerr
 			}
 
-			if selfSignedCert != nil {
-				// mTLS disabled: use self-signed TLS, no sentry ID, empty trust anchors
+			if helmTLSConfig != nil {
+				// mTLS disabled: use Helm-generated TLS certs, no sentry ID, empty trust anchors
 				return inj.Run(ctx,
-					selfSignedCert.TLSConfig,
+					helmTLSConfig,
 					spiffeid.ID{},
 					func(ctx context.Context) ([]byte, error) { return nil, nil },
 				)
@@ -184,8 +182,8 @@ func Run() {
 			)
 		},
 		func(ctx context.Context) error {
-			// When sentry is disabled, trust anchors come from self-signed cert
-			if selfSignedCert != nil {
+			// When sentry is disabled, no trust anchor watching needed
+			if helmTLSConfig != nil {
 				<-ctx.Done()
 				return nil
 			}
@@ -196,24 +194,22 @@ func Run() {
 			sec.WatchTrustAnchors(ctx, caBundleCh)
 			return nil
 		},
-		// Watch for changes to the trust anchors and update the webhook
-		// configuration on events.
 		func(ctx context.Context) error {
-			var caBundle []byte
-			if selfSignedCert != nil {
-				// Use self-signed CA for webhook caBundle
-				caBundle = selfSignedCert.CAPem
-			} else {
-				sec, rerr := secProvider.Handler(ctx)
-				if rerr != nil {
-					return rerr
-				}
+			if helmTLSConfig != nil {
+				// mTLS disabled: Helm already set caBundle on webhook config
+				webConfHealthTarget.Ready()
+				<-ctx.Done()
+				return nil
+			}
 
-				var tErr error
-				caBundle, tErr = sec.CurrentTrustAnchors(ctx)
-				if tErr != nil {
-					return tErr
-				}
+			sec, rerr := secProvider.Handler(ctx)
+			if rerr != nil {
+				return rerr
+			}
+
+			caBundle, tErr := sec.CurrentTrustAnchors(ctx)
+			if tErr != nil {
+				return tErr
 			}
 
 			// Patch the mutating webhook configuration with the current trust

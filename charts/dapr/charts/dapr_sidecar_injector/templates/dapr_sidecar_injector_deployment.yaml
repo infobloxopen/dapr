@@ -237,6 +237,11 @@ spec:
           mountPath: /var/run/secrets/dapr.io/tls
           readOnly: true
       {{- end }}
+      {{- if not .Values.global.mtls.enabled }}
+        - name: dapr-injector-cert
+          mountPath: /dapr/cert
+          readOnly: true
+      {{- end }}
       {{- if .Values.global.mtls.mountSentryVolume }}
         - name: dapr-identity-token
           mountPath: /var/run/secrets/dapr.io/sentrytoken
@@ -250,6 +255,11 @@ spec:
       - name: dapr-trust-bundle
         configMap:
           name: dapr-trust-bundle
+    {{- end }}
+    {{- if not .Values.global.mtls.enabled }}
+      - name: dapr-injector-cert
+        secret:
+          secretName: dapr-sidecar-injector-cert
     {{- end }}
     {{- if .Values.global.mtls.mountSentryVolume }}
       - name: dapr-identity-token

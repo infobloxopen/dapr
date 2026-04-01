@@ -87,10 +87,10 @@ type Options struct {
 type operator struct {
 	apiServer api.Server
 
-	config         *Config
-	mgr            ctrl.Manager
-	secProvider    security.Provider
-	selfSignedCert *security.SelfSignedCert
+	config      *Config
+	mgr         ctrl.Manager
+	secProvider security.Provider
+	enableMTLS  bool
 
 	secHealthz                  healthz.Target
 	apiServerHealthz            healthz.Target
@@ -125,40 +125,11 @@ func NewOperator(ctx context.Context, opts Options) (Operator, error) {
 		return nil, err
 	}
 
-	// When mTLS is disabled (no sentry), generate self-signed certs for webhooks.
-	var selfSignedCert *security.SelfSignedCert
+	// When mTLS is disabled (no sentry), disable authz checks on operator gRPC API.
+	// Webhook TLS certs are provided by Helm-generated Secrets mounted into the pod.
 	if !opts.EnableMTLS {
-		namespace := security.CurrentNamespace()
-		dnsNames := []string{
-			"dapr-operator",
-			"dapr-operator." + namespace,
-			"dapr-operator." + namespace + ".svc",
-			"dapr-operator." + namespace + ".svc.cluster.local",
-		}
-		selfSignedCert, err = security.GenerateSelfSignedCert(dnsNames, 50*365*24*time.Hour)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate self-signed webhook cert: %w", err)
-		}
-		log.Info("Generated self-signed certificates for operator webhook (sentry disabled)")
-
-		// Disable mTLS-based authz on the operator gRPC API so that
-		// sidecars connecting without client certificates are allowed.
 		authz.SetMTLSDisabled(true)
-	}
-
-	// controller-runtime webhook server requires TLS cert files on disk.
-	// When using self-signed certs, write them to the default path.
-	if selfSignedCert != nil {
-		certDir := "/tmp/k8s-webhook-server/serving-certs"
-		if mkErr := os.MkdirAll(certDir, 0o700); mkErr != nil {
-			return nil, fmt.Errorf("failed to create webhook cert dir: %w", mkErr)
-		}
-		if wErr := os.WriteFile(certDir+"/tls.crt", selfSignedCert.CertPEM, 0o600); wErr != nil {
-			return nil, fmt.Errorf("failed to write webhook tls.crt: %w", wErr)
-		}
-		if wErr := os.WriteFile(certDir+"/tls.key", selfSignedCert.KeyPEM, 0o600); wErr != nil {
-			return nil, fmt.Errorf("failed to write webhook tls.key: %w", wErr)
-		}
+		log.Info("mTLS disabled: using Helm-generated certificates for webhooks")
 	}
 
 	watchdogPodSelector := getSideCarInjectedNotExistsSelector()
@@ -176,9 +147,8 @@ func NewOperator(ctx context.Context, opts Options) (Operator, error) {
 			Port: opts.WebhookServerPort,
 			TLSOpts: []func(*tls.Config){
 				func(tlsConfig *tls.Config) {
-					if selfSignedCert != nil {
-						// Use self-signed cert when sentry is disabled
-						*tlsConfig = *selfSignedCert.TLSConfig
+					if !opts.EnableMTLS {
+						// Certs loaded from disk by controller-runtime (Helm-generated Secret)
 						return
 					}
 					sec, sErr := secProvider.Handler(ctx)
@@ -233,7 +203,7 @@ func NewOperator(ctx context.Context, opts Options) (Operator, error) {
 	return &operator{
 		mgr:                         mgr,
 		secProvider:                 secProvider,
-		selfSignedCert:               selfSignedCert,
+		enableMTLS:                  opts.EnableMTLS,
 		config:                      config,
 		secHealthz:                  opts.Healthz.AddTarget("operator-security"),
 		apiServerHealthz:            opts.Healthz.AddTarget("operator-api-server"),
@@ -325,8 +295,8 @@ func (o *operator) Start(ctx context.Context) error {
 				<-ctx.Done()
 				return nil
 			}
-			// When sentry is disabled, trust anchors come from self-signed cert
-			if o.selfSignedCert != nil {
+			// When sentry is disabled, no trust anchor watching needed
+			if !o.enableMTLS {
 				<-ctx.Done()
 				return nil
 			}
@@ -345,9 +315,13 @@ func (o *operator) Start(ctx context.Context) error {
 			}
 
 			var caBundle []byte
-			if o.selfSignedCert != nil {
-				// Use self-signed CA for webhook caBundle
-				caBundle = o.selfSignedCert.CAPem
+			if !o.enableMTLS {
+				// Read CA from Helm-generated cert Secret mounted on disk
+				var readErr error
+				caBundle, readErr = os.ReadFile("/tmp/k8s-webhook-server/serving-certs/ca.crt")
+				if readErr != nil {
+					return fmt.Errorf("failed to read CA cert for webhook: %w", readErr)
+				}
 			} else {
 				sec, rErr := o.secProvider.Handler(ctx)
 				if rErr != nil {
