@@ -357,8 +357,8 @@ func TestNew_OptionsTrustAnchorsAndJWKS(t *testing.T) {
 		assert.Contains(t, err.Error(), "trust anchors are required")
 	})
 
-	t.Run("missing trust anchors in Kubernetes mode should fail", func(t *testing.T) {
-		_, err := New(t.Context(), Options{
+	t.Run("missing trust anchors in Kubernetes mode should succeed when mTLS disabled", func(t *testing.T) {
+		p, err := New(t.Context(), Options{
 			AppID:                   "test",
 			ControlPlaneTrustDomain: "test.example.com",
 			ControlPlaneNamespace:   "default",
@@ -367,8 +367,8 @@ func TestNew_OptionsTrustAnchorsAndJWKS(t *testing.T) {
 			Healthz:                 mockHealthz,
 		})
 
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "trust anchors are required")
+		require.NoError(t, err)
+		assert.NotNil(t, p)
 	})
 
 	t.Run("valid TrustAnchors only should succeed", func(t *testing.T) {

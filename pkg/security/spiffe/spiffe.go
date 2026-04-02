@@ -77,6 +77,16 @@ func FromStrings(td spiffeid.TrustDomain, namespace, appID string) (*Parsed, err
 	}, nil
 }
 
+// Synthetic creates a Parsed identity without a real SPIFFE ID, for use when
+// mTLS is disabled and no client certificate is available. The namespace and
+// appID are used for resource scoping/filtering only.
+func Synthetic(namespace, appID string) *Parsed {
+	return &Parsed{
+		namespace: namespace,
+		appID:     appID,
+	}
+}
+
 func (p *Parsed) TrustDomain() spiffeid.TrustDomain {
 	if p == nil {
 		return spiffeid.TrustDomain{}

@@ -1,3 +1,4 @@
+{{- if .Values.global.mtls.enabled }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -89,3 +90,4 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: dapr-sentry
+{{- end }}

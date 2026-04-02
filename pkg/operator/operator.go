@@ -46,6 +46,7 @@ import (
 	"github.com/dapr/dapr/pkg/healthz"
 	"github.com/dapr/dapr/pkg/modes"
 	"github.com/dapr/dapr/pkg/operator/api"
+	"github.com/dapr/dapr/pkg/operator/api/authz"
 	operatorcache "github.com/dapr/dapr/pkg/operator/cache"
 	"github.com/dapr/dapr/pkg/operator/handlers"
 	operatorv1pb "github.com/dapr/dapr/pkg/proto/operator/v1"
@@ -73,6 +74,7 @@ type Options struct {
 	ArgoRolloutServiceReconcilerEnabled bool
 	WatchdogCanPatchPodLabels           bool
 	TrustAnchorsFile                    string
+	EnableMTLS                          bool
 	APIPort                             int
 	APIListenAddress                    string
 	HealthzPort                         int
@@ -88,6 +90,7 @@ type operator struct {
 	config      *Config
 	mgr         ctrl.Manager
 	secProvider security.Provider
+	enableMTLS  bool
 
 	secHealthz                  healthz.Target
 	apiServerHealthz            healthz.Target
@@ -114,13 +117,19 @@ func NewOperator(ctx context.Context, opts Options) (Operator, error) {
 		ControlPlaneNamespace:   security.CurrentNamespace(),
 		TrustAnchorsFile:        &opts.TrustAnchorsFile,
 		AppID:                   "dapr-operator",
-		// mTLS is always enabled for the operator.
-		MTLSEnabled: true,
-		Mode:        modes.KubernetesMode,
-		Healthz:     opts.Healthz,
+		MTLSEnabled:             opts.EnableMTLS,
+		Mode:                    modes.KubernetesMode,
+		Healthz:                 opts.Healthz,
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// When mTLS is disabled (no sentry), disable authz checks on operator gRPC API.
+	// Webhook TLS certs are provided by Helm-generated Secrets mounted into the pod.
+	if !opts.EnableMTLS {
+		authz.SetMTLSDisabled(true)
+		log.Info("mTLS disabled: using Helm-generated certificates for webhooks")
 	}
 
 	watchdogPodSelector := getSideCarInjectedNotExistsSelector()
@@ -138,6 +147,10 @@ func NewOperator(ctx context.Context, opts Options) (Operator, error) {
 			Port: opts.WebhookServerPort,
 			TLSOpts: []func(*tls.Config){
 				func(tlsConfig *tls.Config) {
+					if !opts.EnableMTLS {
+						// Certs loaded from disk by controller-runtime (Helm-generated Secret)
+						return
+					}
 					sec, sErr := secProvider.Handler(ctx)
 					// Error here means that the context has been cancelled before security
 					// is ready.
@@ -190,6 +203,7 @@ func NewOperator(ctx context.Context, opts Options) (Operator, error) {
 	return &operator{
 		mgr:                         mgr,
 		secProvider:                 secProvider,
+		enableMTLS:                  opts.EnableMTLS,
 		config:                      config,
 		secHealthz:                  opts.Healthz.AddTarget("operator-security"),
 		apiServerHealthz:            opts.Healthz.AddTarget("operator-api-server"),
@@ -281,6 +295,11 @@ func (o *operator) Start(ctx context.Context) error {
 				<-ctx.Done()
 				return nil
 			}
+			// When sentry is disabled, no trust anchor watching needed
+			if !o.enableMTLS {
+				<-ctx.Done()
+				return nil
+			}
 			sec, rErr := o.secProvider.Handler(ctx)
 			if rErr != nil {
 				return rErr
@@ -295,20 +314,30 @@ func (o *operator) Start(ctx context.Context) error {
 				return nil
 			}
 
-			sec, rErr := o.secProvider.Handler(ctx)
-			if rErr != nil {
-				return rErr
-			}
+			var caBundle []byte
+			if !o.enableMTLS {
+				// Read CA from Helm-generated cert Secret mounted on disk
+				var readErr error
+				caBundle, readErr = os.ReadFile("/tmp/k8s-webhook-server/serving-certs/ca.crt")
+				if readErr != nil {
+					return fmt.Errorf("failed to read CA cert for webhook: %w", readErr)
+				}
+			} else {
+				sec, rErr := o.secProvider.Handler(ctx)
+				if rErr != nil {
+					return rErr
+				}
 
-			caBundle, rErr := sec.CurrentTrustAnchors(ctx)
-			if rErr != nil {
-				return rErr
+				var tErr error
+				caBundle, tErr = sec.CurrentTrustAnchors(ctx)
+				if tErr != nil {
+					return tErr
+				}
 			}
 
 			for {
-				rErr = o.patchConversionWebhooksInCRDs(ctx, caBundle, o.mgr.GetConfig(), "subscriptions.dapr.io")
-				if rErr != nil {
-					return rErr
+				if pErr := o.patchConversionWebhooksInCRDs(ctx, caBundle, o.mgr.GetConfig(), "subscriptions.dapr.io"); pErr != nil {
+					return pErr
 				}
 
 				o.webhookHealthz.Ready()

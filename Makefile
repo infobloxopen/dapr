@@ -56,7 +56,13 @@ PROTOBUF_SUITE_VERSION = 25.4
 PROTOC_GEN_GO_NAME = "protoc-gen-go"
 
 GIT_COMMIT_NUMBER = $(shell git rev-parse --short HEAD)
-DAPR_VERSION = v1.16.6-ib-$(GIT_COMMIT_NUMBER)
+GIT_DIRTY := $(shell git status --porcelain 2>/dev/null | head -1)
+ifneq ($(GIT_DIRTY),)
+  BUILD_COUNTER := $(shell cat .build-counter 2>/dev/null || echo 0)
+  DAPR_VERSION = v1.16.6-ib-$(GIT_COMMIT_NUMBER)-unreleased-j$(BUILD_COUNTER)
+else
+  DAPR_VERSION = v1.16.6-ib-$(GIT_COMMIT_NUMBER)
+endif
 REPO         := infoblox
 DAPR_TAG ?= $(DAPR_VERSION)
 TARGET_OS ?= linux
@@ -639,6 +645,13 @@ DEV_BIN_PATH = $(OUT_DIR)/linux_$(DEV_TARGET_ARCH)/release
 # Dev build linux binaries for target architecture (default: amd64)
 .PHONY: dev-build-linux
 dev-build-linux:
+	@# Increment build counter for unreleased builds
+	@if [ -n "$$(git status --porcelain 2>/dev/null)" ]; then \
+		counter=$$(cat .build-counter 2>/dev/null || echo -1); \
+		counter=$$((counter + 1)); \
+		echo $$counter > .build-counter; \
+		echo "Build counter: j$$counter"; \
+	fi
 	$(info Building linux binaries for $(DEV_TARGET_ARCH)...)
 	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/daprd ./cmd/daprd/
 	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/placement ./cmd/placement/
@@ -651,22 +664,22 @@ dev-build-linux:
 .PHONY: dev-docker-build
 dev-docker-build: dev-build-linux
 	$(info Building dev images for $(DEV_REGISTRY) (linux/$(DEV_TARGET_ARCH))...)
-	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=* -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-dapr:$(DEV_TAG)
-	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=daprd -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-daprd:$(DEV_TAG)
-	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=placement -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-placement:$(DEV_TAG)
-	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=sentry -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-sentry:$(DEV_TAG)
-	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=operator -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-operator:$(DEV_TAG)
-	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=injector -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-injector:$(DEV_TAG)
-	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=scheduler -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr-scheduler:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=* -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=daprd -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/daprd:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=placement -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/placement:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=sentry -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/sentry:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=operator -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/operator:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=injector -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/injector:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=scheduler -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/scheduler:$(DEV_TAG)
 
 # Dev docker push - pushes images to Harbor dev registry
 .PHONY: dev-docker-push
 dev-docker-push: dev-docker-build
 	$(info Pushing dev images to $(DEV_REGISTRY)...)
-	$(DOCKER) push $(DEV_REGISTRY)/dapr-dapr:$(DEV_TAG)
-	$(DOCKER) push $(DEV_REGISTRY)/dapr-daprd:$(DEV_TAG)
-	$(DOCKER) push $(DEV_REGISTRY)/dapr-placement:$(DEV_TAG)
-	$(DOCKER) push $(DEV_REGISTRY)/dapr-sentry:$(DEV_TAG)
-	$(DOCKER) push $(DEV_REGISTRY)/dapr-operator:$(DEV_TAG)
-	$(DOCKER) push $(DEV_REGISTRY)/dapr-injector:$(DEV_TAG)
-	$(DOCKER) push $(DEV_REGISTRY)/dapr-scheduler:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/daprd:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/placement:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/sentry:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/operator:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/injector:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/scheduler:$(DEV_TAG)

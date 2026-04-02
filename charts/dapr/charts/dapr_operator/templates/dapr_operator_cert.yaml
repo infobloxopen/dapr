@@ -1,0 +1,29 @@
+{{- if not .Values.global.mtls.enabled }}
+{{- $existingSecret := lookup "v1" "Secret" .Release.Namespace "dapr-operator-cert" }}
+{{- $ca := genCA "dapr-operator-ca" 3650 }}
+{{- $cn := "dapr-operator" }}
+{{- $altName1 := printf "dapr-operator.%s" .Release.Namespace }}
+{{- $altName2 := printf "dapr-operator.%s.svc" .Release.Namespace }}
+{{- $altName3 := printf "dapr-operator.%s.svc.cluster.local" .Release.Namespace }}
+{{- $cert := genSignedCert $cn nil (list $altName1 $altName2 $altName3) 3650 $ca }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dapr-operator-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: dapr-operator
+    {{- range $key, $value := .Values.global.k8sLabels }}
+    {{ $key }}: {{ tpl $value $ }}
+    {{- end }}
+data:
+  {{ if $existingSecret }}tls.crt: {{ index $existingSecret.data "tls.crt" }}
+  {{ else }}tls.crt: {{ b64enc $cert.Cert }}
+  {{ end }}
+  {{ if $existingSecret }}tls.key: {{ index $existingSecret.data "tls.key" }}
+  {{ else }}tls.key: {{ b64enc $cert.Key }}
+  {{ end }}
+  {{ if $existingSecret }}ca.crt: {{ index $existingSecret.data "ca.crt" }}
+  {{ else }}ca.crt: {{ b64enc $ca.Cert }}
+  {{ end }}
+{{- end }}

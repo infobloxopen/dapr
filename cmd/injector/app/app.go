@@ -15,10 +15,12 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"math"
 	"os"
 
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -106,12 +108,26 @@ func Run() {
 		ControlPlaneNamespace:   namespace,
 		TrustAnchorsFile:        &cfg.TrustAnchorsFile,
 		AppID:                   "dapr-injector",
-		MTLSEnabled:             true,
+		MTLSEnabled:             opts.EnableMTLS,
 		Mode:                    modes.KubernetesMode,
 		Healthz:                 healthz,
 	})
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// When mTLS is disabled (no sentry), load Helm-generated certs for webhooks.
+	var helmTLSConfig *tls.Config
+	if !opts.EnableMTLS {
+		cert, loadErr := tls.LoadX509KeyPair("/dapr/cert/tls.crt", "/dapr/cert/tls.key")
+		if loadErr != nil {
+			log.Fatalf("Error loading webhook TLS certificates: %v", loadErr)
+		}
+		helmTLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		log.Info("Loaded Helm-generated certificates for injector webhook (sentry disabled)")
 	}
 
 	inj, err := service.NewInjector(service.Options{
@@ -145,8 +161,18 @@ func Run() {
 			if rerr != nil {
 				return rerr
 			}
+
+			if helmTLSConfig != nil {
+				// mTLS disabled: use Helm-generated TLS certs, no sentry ID, empty trust anchors
+				return inj.Run(ctx,
+					helmTLSConfig,
+					spiffeid.ID{},
+					func(ctx context.Context) ([]byte, error) { return nil, nil },
+				)
+			}
+
 			sentryID, rerr := security.SentryID(sec.ControlPlaneTrustDomain(), security.CurrentNamespace())
-			if err != nil {
+			if rerr != nil {
 				return rerr
 			}
 			return inj.Run(ctx,
@@ -156,6 +182,11 @@ func Run() {
 			)
 		},
 		func(ctx context.Context) error {
+			// When sentry is disabled, no trust anchor watching needed
+			if helmTLSConfig != nil {
+				<-ctx.Done()
+				return nil
+			}
 			sec, rerr := secProvider.Handler(ctx)
 			if rerr != nil {
 				return rerr
@@ -163,31 +194,35 @@ func Run() {
 			sec.WatchTrustAnchors(ctx, caBundleCh)
 			return nil
 		},
-		// Watch for changes to the trust anchors and update the webhook
-		// configuration on events.
 		func(ctx context.Context) error {
+			if helmTLSConfig != nil {
+				// mTLS disabled: Helm already set caBundle on webhook config
+				webConfHealthTarget.Ready()
+				<-ctx.Done()
+				return nil
+			}
+
 			sec, rerr := secProvider.Handler(ctx)
 			if rerr != nil {
 				return rerr
 			}
 
-			caBundle, rErr := sec.CurrentTrustAnchors(ctx)
-			if rErr != nil {
-				return rErr
+			caBundle, tErr := sec.CurrentTrustAnchors(ctx)
+			if tErr != nil {
+				return tErr
 			}
 
 			// Patch the mutating webhook configuration with the current trust
 			// anchors.
 			// Re-patch every time the trust anchors change.
 			for {
-				_, rErr = kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Patch(ctx,
+				if _, pErr := kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Patch(ctx,
 					"dapr-sidecar-injector",
 					types.JSONPatchType,
 					[]byte(`[{"op":"replace","path":"/webhooks/0/clientConfig/caBundle","value":"`+base64.StdEncoding.EncodeToString(caBundle)+`"}]`),
 					metav1.PatchOptions{},
-				)
-				if rErr != nil {
-					return rErr
+				); pErr != nil {
+					return pErr
 				}
 
 				webConfHealthTarget.Ready()
