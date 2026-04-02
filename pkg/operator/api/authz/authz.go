@@ -16,6 +16,7 @@ package authz
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -23,9 +24,26 @@ import (
 	"github.com/dapr/dapr/pkg/security/spiffe"
 )
 
+// mtlsDisabled is an atomic flag that disables authz checks when mTLS is off.
+var mtlsDisabled atomic.Bool
+
+// SetMTLSDisabled sets whether mTLS-based authz should be bypassed.
+// When disabled, all requests are allowed without identity verification.
+func SetMTLSDisabled(disabled bool) {
+	mtlsDisabled.Store(disabled)
+}
+
 // Request ensures that the requesting identity resides in the same
 // namespace as that of the requested namespace.
+// When mTLS is disabled, the check is skipped and a nil identity is returned.
 func Request(ctx context.Context, namespace string) (*spiffe.Parsed, error) {
+	if mtlsDisabled.Load() {
+		// When mTLS is disabled, return a synthetic identity with the
+		// requested namespace so that namespace-scoped filtering still
+		// works. AppID will be empty, allowing all unscoped resources.
+		return spiffe.Synthetic(namespace, ""), nil
+	}
+
 	id, ok, err := spiffe.FromGRPCContext(ctx)
 	if err != nil || !ok {
 		return nil, status.New(codes.PermissionDenied, "failed to determine identity").Err()

@@ -64,6 +64,7 @@ func Run() {
 		WatchdogEnabled:                     opts.WatchdogEnabled,
 		WatchdogInterval:                    opts.WatchdogInterval,
 		WatchdogCanPatchPodLabels:           opts.WatchdogCanPatchPodLabels,
+		EnableMTLS:                          opts.EnableMTLS,
 		APIPort:                             opts.APIPort,
 		APIListenAddress:                    opts.APIListenAddress,
 		WebhookServerPort:                   opts.WebhookServerPort,
