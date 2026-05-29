@@ -90,8 +90,8 @@ type SidecarConfig struct {
 	ActorsService               string
 	RemindersService            string
 	SentrySPIFFEID              string
-	SidecarHTTPPort             int32 `default:"3500"`
-	SidecarPublicPort           int32 `default:"3501"`
+	SidecarHTTPPort             int32 `annotation:"dapr.io/http-port" default:"3500"`
+	SidecarPublicPort           int32 `annotation:"dapr.io/public-port" default:"3501"`
 
 	Enabled                             bool    `annotation:"dapr.io/enabled"`
 	AppPort                             int32   `annotation:"dapr.io/app-port"`
