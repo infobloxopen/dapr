@@ -112,3 +112,54 @@ func TestSidecarConfigSetFromAnnotations(t *testing.T) {
 		}
 	})
 }
+
+func TestLegacyInfobloxAnnotations(t *testing.T) {
+	t.Run("map legacy infoblox annotations to standard dapr annotations", func(t *testing.T) {
+		pod := &corev1.Pod{}
+		pod.Annotations = map[string]string{
+			"com.infoblox.dapr.sidecar-grpc-port":          "27002",
+			"com.infoblox.dapr.sidecar-http-port":          "27003",
+			"com.infoblox.dapr.sidecar-internal-grpc-port": "27004",
+			"com.infoblox.dapr.sidecar-public-port":        "27006",
+		}
+
+		c := NewSidecarConfig(pod)
+		c.SetFromPodAnnotations()
+
+		assert.Equal(t, int32(27002), c.SidecarAPIGRPCPort)
+		assert.Equal(t, int32(27003), c.SidecarHTTPPort)
+		assert.Equal(t, int32(27004), c.SidecarInternalGRPCPort)
+		assert.Equal(t, int32(27006), c.SidecarPublicPort)
+	})
+
+	t.Run("standard dapr annotations take precedence over legacy", func(t *testing.T) {
+		pod := &corev1.Pod{}
+		pod.Annotations = map[string]string{
+			"com.infoblox.dapr.sidecar-http-port":   "27003",
+			"com.infoblox.dapr.sidecar-public-port": "27006",
+			"dapr.io/http-port":                     "8080",
+			"dapr.io/public-port":                   "8081",
+		}
+
+		c := NewSidecarConfig(pod)
+		c.SetFromPodAnnotations()
+
+		// Standard annotations should win
+		assert.Equal(t, int32(8080), c.SidecarHTTPPort)
+		assert.Equal(t, int32(8081), c.SidecarPublicPort)
+	})
+
+	t.Run("use default when neither legacy nor standard annotation present", func(t *testing.T) {
+		pod := &corev1.Pod{}
+		pod.Annotations = map[string]string{}
+
+		c := NewSidecarConfig(pod)
+		c.SetFromPodAnnotations()
+
+		// Should use defaults from struct tags
+		assert.Equal(t, int32(3500), c.SidecarHTTPPort)
+		assert.Equal(t, int32(3501), c.SidecarPublicPort)
+		assert.Equal(t, int32(50001), c.SidecarAPIGRPCPort)
+		assert.Equal(t, int32(50002), c.SidecarInternalGRPCPort)
+	})
+}

@@ -31,6 +31,7 @@ const (
 	infobloxSidecarGRPCPort         = "com.infoblox.dapr.sidecar-grpc-port"
 	infobloxSidecarHTTPPort         = "com.infoblox.dapr.sidecar-http-port"
 	infobloxSidecarInternalGRPCPort = "com.infoblox.dapr.sidecar-internal-grpc-port"
+	infobloxSidecarPublicPort       = "com.infoblox.dapr.sidecar-public-port"
 )
 
 // mapLegacyInfobloxAnnotations copies legacy Infoblox annotations to standard Dapr annotations
@@ -46,6 +47,7 @@ func mapLegacyInfobloxAnnotations(an map[string]string) map[string]string {
 		infobloxSidecarGRPCPort:         "dapr.io/grpc-port",
 		infobloxSidecarHTTPPort:         "dapr.io/http-port",
 		infobloxSidecarInternalGRPCPort: "dapr.io/internal-grpc-port",
+		infobloxSidecarPublicPort:       "dapr.io/public-port",
 	}
 
 	for legacyKey, standardKey := range legacyMappings {
