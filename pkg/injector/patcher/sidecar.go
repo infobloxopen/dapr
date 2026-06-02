@@ -26,12 +26,12 @@ import (
 	kitstrings "github.com/dapr/kit/strings"
 )
 
-// Infoblox legacy annotation keys for backward compatibility
+// Infoblox legacy annotation keys for backward compatibility.
+// Only annotations that existed in v1.0.0-ib are mapped here.
 const (
 	infobloxSidecarGRPCPort         = "com.infoblox.dapr.sidecar-grpc-port"
 	infobloxSidecarHTTPPort         = "com.infoblox.dapr.sidecar-http-port"
 	infobloxSidecarInternalGRPCPort = "com.infoblox.dapr.sidecar-internal-grpc-port"
-	infobloxSidecarPublicPort       = "com.infoblox.dapr.sidecar-public-port"
 )
 
 // mapLegacyInfobloxAnnotations copies legacy Infoblox annotations to standard Dapr annotations
@@ -47,7 +47,6 @@ func mapLegacyInfobloxAnnotations(an map[string]string) map[string]string {
 		infobloxSidecarGRPCPort:         "dapr.io/grpc-port",
 		infobloxSidecarHTTPPort:         "dapr.io/http-port",
 		infobloxSidecarInternalGRPCPort: "dapr.io/internal-grpc-port",
-		infobloxSidecarPublicPort:       "dapr.io/public-port",
 	}
 
 	for legacyKey, standardKey := range legacyMappings {
@@ -93,7 +92,7 @@ type SidecarConfig struct {
 	RemindersService            string
 	SentrySPIFFEID              string
 	SidecarHTTPPort             int32 `annotation:"dapr.io/http-port" default:"3500"`
-	SidecarPublicPort           int32 `annotation:"dapr.io/public-port" default:"3501"`
+	SidecarPublicPort           int32 `annotation:"dapr.io/public-port" default:"0"`
 
 	Enabled                             bool    `annotation:"dapr.io/enabled"`
 	AppPort                             int32   `annotation:"dapr.io/app-port"`
