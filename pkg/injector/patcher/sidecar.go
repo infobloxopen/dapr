@@ -26,7 +26,8 @@ import (
 	kitstrings "github.com/dapr/kit/strings"
 )
 
-// Infoblox legacy annotation keys for backward compatibility
+// Infoblox legacy annotation keys for backward compatibility.
+// Only annotations that existed in v1.0.0-ib are mapped here.
 const (
 	infobloxSidecarGRPCPort         = "com.infoblox.dapr.sidecar-grpc-port"
 	infobloxSidecarHTTPPort         = "com.infoblox.dapr.sidecar-http-port"
@@ -89,8 +90,8 @@ type SidecarConfig struct {
 	ActorsService               string
 	RemindersService            string
 	SentrySPIFFEID              string
-	SidecarHTTPPort             int32 `default:"3500"`
-	SidecarPublicPort           int32 `default:"3501"`
+	SidecarHTTPPort             int32 `annotation:"dapr.io/http-port" default:"3500"`
+	SidecarPublicPort           int32 `annotation:"dapr.io/public-port" default:"0"`
 	SchedulerAddressDNSA        string
 
 	// TODO: @joshvanl: remove in v1.17

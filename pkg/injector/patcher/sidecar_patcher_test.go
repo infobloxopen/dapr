@@ -308,6 +308,7 @@ func TestPatching(t *testing.T) {
 
 				assert.NotNil(t, daprdContainer.LivenessProbe)
 				assert.Equal(t, 3501, daprdContainer.LivenessProbe.TCPSocket.Port.IntValue())
+				assert.Empty(t, daprdContainer.LivenessProbe.TCPSocket.Host)
 
 				// Assertions on added volumes
 				assert.Len(t, pod.Spec.Volumes, 1)
