@@ -550,12 +550,15 @@ func TestPublicPortExplicitlySet(t *testing.T) {
 		assert.Empty(t, container.ReadinessProbe.HTTPGet.Host)
 	})
 
-	t.Run("no public port in args and probes fallback to http port when default", func(t *testing.T) {
+	t.Run("hostNetwork pod: no public port, probes fallback to http port on localhost", func(t *testing.T) {
 		c := NewSidecarConfig(&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{
 					annotations.KeyAppID: "myapp",
 				},
+			},
+			Spec: corev1.PodSpec{
+				HostNetwork: true,
 			},
 		})
 		c.SidecarImage = "daprio/dapr"
@@ -567,7 +570,7 @@ func TestPublicPortExplicitlySet(t *testing.T) {
 		container, err := c.getSidecarContainer(getSidecarContainerOpts{})
 		require.NoError(t, err)
 
-		// --dapr-public-port should NOT appear in args
+		// --dapr-public-port should NOT appear in args (hostNetwork, no collision risk)
 		args := strings.Join(container.Args, " ")
 		assert.NotContains(t, args, "--dapr-public-port")
 
@@ -578,6 +581,37 @@ func TestPublicPortExplicitlySet(t *testing.T) {
 		assert.NotNil(t, container.ReadinessProbe)
 		assert.Equal(t, int32(3500), container.ReadinessProbe.HTTPGet.Port.IntVal)
 		assert.Equal(t, "127.0.0.1", container.ReadinessProbe.HTTPGet.Host)
+	})
+
+	t.Run("non-hostNetwork pod: implicit public port 3501 for probes", func(t *testing.T) {
+		c := NewSidecarConfig(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					annotations.KeyAppID: "myapp",
+				},
+			},
+			// HostNetwork defaults to false
+		})
+		c.SidecarImage = "daprio/dapr"
+		c.Namespace = "dapr-system"
+		c.OperatorAddress = "controlplane:9000"
+
+		c.SetFromPodAnnotations()
+
+		container, err := c.getSidecarContainer(getSidecarContainerOpts{})
+		require.NoError(t, err)
+
+		// --dapr-public-port 3501 should appear (needed for kubelet probes)
+		args := strings.Join(container.Args, " ")
+		assert.Contains(t, args, "--dapr-public-port 3501")
+
+		// Probes should use port 3501 with no host (kubelet uses pod IP)
+		assert.NotNil(t, container.LivenessProbe)
+		assert.Equal(t, int32(3501), container.LivenessProbe.TCPSocket.Port.IntVal)
+		assert.Empty(t, container.LivenessProbe.TCPSocket.Host)
+		assert.NotNil(t, container.ReadinessProbe)
+		assert.Equal(t, int32(3501), container.ReadinessProbe.HTTPGet.Port.IntVal)
+		assert.Empty(t, container.ReadinessProbe.HTTPGet.Host)
 	})
 }
 
@@ -661,6 +695,7 @@ func TestGetSidecarContainer(t *testing.T) {
 			"--dapr-grpc-port", "50001",
 			"--dapr-internal-grpc-port", "50002",
 			"--dapr-listen-addresses", "[::1],127.0.0.1",
+			"--dapr-public-port", "3501",
 			"--app-id", "app_id",
 			"--app-protocol", "http",
 			"--log-level", "info",
@@ -723,6 +758,7 @@ func TestGetSidecarContainer(t *testing.T) {
 			"--dapr-grpc-port", "12345",
 			"--dapr-internal-grpc-port", "12346",
 			"--dapr-listen-addresses", "[::1],127.0.0.1",
+			"--dapr-public-port", "3501",
 			"--app-id", "app_id",
 			"--app-protocol", "http",
 			"--log-level", "info",
@@ -794,6 +830,7 @@ func TestGetSidecarContainer(t *testing.T) {
 			"--dapr-grpc-port", "50001",
 			"--dapr-internal-grpc-port", "50002",
 			"--dapr-listen-addresses", "[::1],127.0.0.1",
+			"--dapr-public-port", "3501",
 			"--app-id", "app_id",
 			"--app-protocol", "http",
 			"--log-level", "info",

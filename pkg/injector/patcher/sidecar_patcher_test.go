@@ -307,8 +307,8 @@ func TestPatching(t *testing.T) {
 				assert.True(t, daprdContainer.VolumeMounts[0].ReadOnly)
 
 				assert.NotNil(t, daprdContainer.LivenessProbe)
-				assert.Equal(t, 3500, daprdContainer.LivenessProbe.TCPSocket.Port.IntValue())
-				assert.Equal(t, "127.0.0.1", daprdContainer.LivenessProbe.TCPSocket.Host)
+				assert.Equal(t, 3501, daprdContainer.LivenessProbe.TCPSocket.Port.IntValue())
+				assert.Empty(t, daprdContainer.LivenessProbe.TCPSocket.Host)
 
 				// Assertions on added volumes
 				assert.Len(t, pod.Spec.Volumes, 1)
