@@ -68,6 +68,11 @@ func (c *SidecarConfig) getSidecarContainer(opts getSidecarContainerOpts) (*core
 	}
 	if c.SidecarPublicPort != 0 {
 		args = append(args, "--dapr-public-port", strconv.FormatInt(int64(c.SidecarPublicPort), 10))
+	} else if !c.pod.Spec.HostNetwork {
+		// Non-hostNetwork pods need a public port for kubelet probes because the HTTP
+		// port only listens on the pod's loopback (unreachable from the host netns).
+		// Use the legacy default 3501; this is safe since each pod has its own netns.
+		args = append(args, "--dapr-public-port", "3501")
 	}
 	args = append(args,
 		"--app-id", c.GetAppID(),
@@ -256,10 +261,16 @@ func (c *SidecarConfig) getSidecarContainer(opts getSidecarContainerOpts) (*core
 	probePort := c.SidecarPublicPort
 	probeHost := "" // empty = kubelet uses pod IP (public port listens on all interfaces)
 	if probePort == 0 {
-		probePort = c.SidecarHTTPPort
-		// The HTTP port only listens on localhost (--dapr-listen-addresses defaults to
-		// "[::1],127.0.0.1"), so we must direct probes to 127.0.0.1 explicitly.
-		probeHost = "127.0.0.1"
+		if c.pod.Spec.HostNetwork {
+			// hostNetwork: kubelet shares the pod's network namespace, so it can
+			// reach daprd's loopback-only HTTP port directly.
+			probePort = c.SidecarHTTPPort
+			probeHost = "127.0.0.1"
+		} else {
+			// Non-hostNetwork: kubelet cannot reach the pod's loopback. We passed
+			// --dapr-public-port 3501 above, so probe that (all-interfaces).
+			probePort = 3501
+		}
 	}
 	readinessProbeHandler := getReadinessProbeHandler(probePort, probeHost, injectorConsts.APIVersionV1, injectorConsts.SidecarHealthzPath)
 	livenessProbeHandler := getLivenessProbeHandler(probePort, probeHost)
