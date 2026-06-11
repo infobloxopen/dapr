@@ -1,0 +1,48 @@
+name: Wiz Security Scan
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - master
+      - 'v*.*.*-ib'
+      - 'release/**'
+  push:
+    branches:
+      - main
+      - master
+      - 'v*.*.*-ib'
+      - 'release/**'
+
+concurrency:
+  group: wiz-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Job 1: Docker image scan via centralized reusable workflow
+  docker-scan:
+    name: Docker Image Scan
+    uses: Infoblox-CTO/.github/.github/workflows/wiz-security-scan-reusable.yaml@main
+    secrets:
+      GITPAT: ${{ secrets.GITPAT }}
+      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+      HARBOR_SERVICES_PROD_USERNAME: ${{ secrets.HARBOR_SERVICES_PROD_USERNAME }}
+      HARBOR_SERVICES_PROD_PASSWORD: ${{ secrets.HARBOR_SERVICES_PROD_PASSWORD }}
+    with:
+      dockerfile-path: 'docker/Dockerfile'
+      docker-context: './dist/linux_amd64/release'
+      docker-build-args: 'PKG_FILES=daprd'
+      pre-build-command: 'make dev-build-linux'
+
+  # Job 2: IaC + directory scan via centralized reusable workflow
+  iac-and-dir-scan:
+    name: IaC & Directory Scan
+    uses: Infoblox-CTO/.github/.github/workflows/wiz-iac-scan-reusable.yaml@main
+    secrets:
+      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+    with:
+      iac-types: 'Dockerfile,Kubernetes'
