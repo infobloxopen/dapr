@@ -87,6 +87,7 @@ HELM_MANIFEST_FILE:=$(HELM_CHART_ROOT)/manifest/$(RELEASE_NAME).yaml
 # Go build details                                                             #
 ################################################################################
 BASE_PACKAGE_NAME := github.com/dapr/dapr
+GO_COVERPKG ?= $(shell go list ./... | grep -v vendor | tr '\n' ',' | sed 's/,$$//')
 
 DEFAULT_LDFLAGS:=-X $(BASE_PACKAGE_NAME)/pkg/version.commit=$(GIT_VERSION) -X $(BASE_PACKAGE_NAME)/pkg/version.version=$(DAPR_VERSION)
 
@@ -307,10 +308,78 @@ clean:
 	$(DOCKER) rmi -f $(shell docker images -q $(DAPR_RUNTIME_DOCKER_IMAGE_TAG)) || true
 	$(DOCKER) rmi -f $(shell docker images -q $(DAPR_PLACEMENT_DOCKER_IMAGE_TAG)) || true
 	$(DOCKER) rmi -f $(shell docker images -q $(DAPR_SENTRY_DOCKER_IMAGE_TAG)) || true
+	$(RM) coverage-*.out coverage.html .coverage-test-only-packages.tmp
 ################################################################################
 # Target: test                                                                 #
 ################################################################################
 .PHONY: test
 test:
-	go test ./pkg/... $(COVERAGE_OPTS)
-	go test ./tests/...
+	go test ./pkg/... $(COVERAGE_OPTS) -coverprofile=coverage-pkg.out -covermode=atomic -coverpkg=$(GO_COVERPKG)
+	go test ./tests/... -coverprofile=coverage-tests.out -covermode=atomic -coverpkg=$(GO_COVERPKG)
+	@$(MAKE) coverage-report
+
+################################################################################
+# Target: coverage-report                                                      #
+################################################################################
+# Coverage exclusion patterns — discovered at generation time from repository structure.
+# *.pb.go files found in pkg/proto/ (includes _grpc.pb.go which also ends in .pb.go)
+# zz_generated*.go files found in pkg/apis/
+# testdata directory found in pkg/config/
+COVERAGE_EXCLUDE_PATTERNS := \.pb\. zz_generated\. /testdata/
+
+## coverage-report: merge all coverage profiles, filter generated/mock code, print stats
+.PHONY: coverage-report
+coverage-report:
+	@printf 'Combining all coverage reports...\n'
+	@echo "mode: atomic" > coverage-combined.out
+	@for file in coverage-pkg.out coverage-tests.out; do \
+		if [ -f $$file ]; then \
+			printf '  - Including %s\n' $$file; \
+			tail -n +2 $$file >> coverage-combined.out; \
+		else \
+			printf '  - Skipping %s (not found)\n' $$file; \
+		fi; \
+	done
+	@printf '\nFiltering generated/non-production files from combined coverage...\n'
+	@cp coverage-combined.out coverage-combined-filtered.out
+	@for pattern in $(COVERAGE_EXCLUDE_PATTERNS); do \
+		grep -v "$$pattern" coverage-combined-filtered.out > coverage-combined-tmp.out || true; \
+		mv coverage-combined-tmp.out coverage-combined-filtered.out; \
+	done
+	@mv coverage-combined-filtered.out coverage-combined.out
+	@printf '\nFiltering packages without non-test Go files...\n'
+	@MODULE=$$(go list -m 2>/dev/null); \
+	awk -v mod="$$MODULE" 'substr($$1,1,length(mod)+1) == mod "/"' coverage-combined.out | \
+		sed 's|:[0-9].*||' | \
+		sed "s|^$${MODULE}/||" | \
+		sed 's|/[^/]*\.go$$||' | \
+		sort -u | while read relpath; do \
+			if [ -d "$$relpath" ]; then \
+				has_prod=$$(find "$$relpath" -maxdepth 1 -name "*.go" ! -name "*_test.go" -type f 2>/dev/null | wc -l | tr -d ' '); \
+				if [ "$$has_prod" = "0" ]; then \
+					echo "  - Excluding $$relpath (test-only package)"; \
+					echo "$$relpath"; \
+				fi; \
+			fi; \
+		done > .coverage-test-only-packages.tmp
+	@MODULE=$$(go list -m 2>/dev/null); \
+	if [ -s .coverage-test-only-packages.tmp ]; then \
+		while read relpath; do \
+			grep -vF "$${MODULE}/$$relpath/" coverage-combined.out > coverage-combined-tmp.out || true; \
+			mv coverage-combined-tmp.out coverage-combined.out; \
+		done < .coverage-test-only-packages.tmp; \
+	fi
+	@rm -f .coverage-test-only-packages.tmp
+	@printf '\n=== Coverage by File ===\n'
+	@go tool cover -func=coverage-combined.out | grep -v "^total:" | sort
+	@printf '\n=== Total Coverage ===\n'
+	@go tool cover -func=coverage-combined.out | grep "total:" | awk '{printf "Overall Coverage: %s\n", $$3}'
+	@printf '\nNote: coverage-combined.out is the SonarQube input (sonar.go.coverage.reportPaths)\n'
+
+## coverage-html: open an interactive HTML coverage report
+.PHONY: coverage-html
+coverage-html: coverage-report
+	@printf '\nGenerating HTML coverage report...\n'
+	@go tool cover -html=coverage-combined.out -o coverage.html
+	@echo "Coverage report generated: coverage.html"
+	@echo "Open with: open coverage.html (macOS) or xdg-open coverage.html (Linux)"
