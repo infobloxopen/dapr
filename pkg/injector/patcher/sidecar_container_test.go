@@ -522,7 +522,7 @@ func TestPublicPortExplicitlySet(t *testing.T) {
 		c := NewSidecarConfig(&corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{
-					annotations.KeyAppID: "myapp",
+					annotations.KeyAppID:  "myapp",
 					"dapr.io/public-port": "3501",
 				},
 			},

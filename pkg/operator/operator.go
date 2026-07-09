@@ -123,9 +123,9 @@ func NewOperator(ctx context.Context, opts Options) (Operator, error) {
 		ControlPlaneNamespace:   security.CurrentNamespace(),
 		TrustAnchorsFile:        &opts.TrustAnchorsFile,
 		AppID:                   "dapr-operator",
-		MTLSEnabled: opts.EnableMTLS,
-		Mode:        modes.KubernetesMode,
-		Healthz:     opts.Healthz,
+		MTLSEnabled:             opts.EnableMTLS,
+		Mode:                    modes.KubernetesMode,
+		Healthz:                 opts.Healthz,
 		// The operator serves CRD conversion / validating / mutating webhooks
 		// to the Kubernetes API server, which on some cloud distributions
 		// rejects Ed25519 serving certs.
