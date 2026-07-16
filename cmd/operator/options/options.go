@@ -50,6 +50,7 @@ type Options struct {
 	watchdogIntervalStr                string
 	WatchdogCanPatchPodLabels          bool
 	TrustAnchorsFile                   string
+	EnableMTLS                         bool
 	Logger                             logger.Options
 	Metrics                            *metrics.FlagOptions
 	APIPort                            int
@@ -81,6 +82,7 @@ func New() *Options {
 	flag.BoolVar(&opts.WatchdogCanPatchPodLabels, "watchdog-can-patch-pod-labels", false, "Allow watchdog to patch pod labels to set pods with sidecar present")
 
 	flag.StringVar(&opts.TrustAnchorsFile, "trust-anchors-file", securityConsts.ControlPlaneDefaultTrustAnchorsPath, "Filepath to the trust anchors for the Dapr control plane")
+	flag.BoolVar(&opts.EnableMTLS, "enable-mtls", true, "Enable mTLS for communication with Sentry. Set to false when Sentry is disabled.")
 
 	flag.IntVar(&opts.APIPort, "port", 6500, "The port for the operator API server to listen on")
 	flag.StringVar(&opts.APIListenAddress, "listen-address", "", "The listening address for the operator API server")

@@ -26,6 +26,40 @@ import (
 	kitstrings "github.com/dapr/kit/strings"
 )
 
+// Infoblox legacy annotation keys for backward compatibility.
+// Only annotations that existed in v1.0.0-ib are mapped here.
+const (
+	infobloxSidecarGRPCPort         = "com.infoblox.dapr.sidecar-grpc-port"
+	infobloxSidecarHTTPPort         = "com.infoblox.dapr.sidecar-http-port"
+	infobloxSidecarInternalGRPCPort = "com.infoblox.dapr.sidecar-internal-grpc-port"
+)
+
+// mapLegacyInfobloxAnnotations copies legacy Infoblox annotations to standard Dapr annotations
+// if the standard annotations are not already set. This provides backward compatibility
+// for applications migrating from v1.0.0-ib.
+func mapLegacyInfobloxAnnotations(an map[string]string) map[string]string {
+	if an == nil {
+		return an
+	}
+
+	// Map legacy Infoblox annotations to standard Dapr annotations (if not already set)
+	legacyMappings := map[string]string{
+		infobloxSidecarGRPCPort:         "dapr.io/grpc-port",
+		infobloxSidecarHTTPPort:         "dapr.io/http-port",
+		infobloxSidecarInternalGRPCPort: "dapr.io/internal-grpc-port",
+	}
+
+	for legacyKey, standardKey := range legacyMappings {
+		if legacyVal, hasLegacy := an[legacyKey]; hasLegacy {
+			if _, hasStandard := an[standardKey]; !hasStandard {
+				an[standardKey] = legacyVal
+			}
+		}
+	}
+
+	return an
+}
+
 // GetInjectedComponentContainersFn is a function that returns the list of component containers for a given appID and namespace.
 type GetInjectedComponentContainersFn = func(appID string, namespace string) ([]corev1.Container, error)
 
@@ -57,8 +91,8 @@ type SidecarConfig struct {
 	ActorsService               string
 	RemindersService            string
 	SentrySPIFFEID              string
-	SidecarHTTPPort             int32 `default:"3500"`
-	SidecarPublicPort           int32 `default:"3501"`
+	SidecarHTTPPort             int32 `annotation:"dapr.io/http-port" default:"3500"`
+	SidecarPublicPort           int32 `annotation:"dapr.io/public-port" default:"0"`
 
 	Enabled                             bool    `annotation:"dapr.io/enabled"`
 	AppPort                             int32   `annotation:"dapr.io/app-port"`
@@ -138,7 +172,9 @@ func NewSidecarConfig(pod *corev1.Pod) *SidecarConfig {
 }
 
 func (c *SidecarConfig) SetFromPodAnnotations() {
-	c.setFromAnnotations(c.pod.Annotations)
+	// INFOBLOX: Map legacy annotations for backward compatibility
+	annotations := mapLegacyInfobloxAnnotations(c.pod.Annotations)
+	c.setFromAnnotations(annotations)
 }
 
 func (c *SidecarConfig) setDefaultValues() {

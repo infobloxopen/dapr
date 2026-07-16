@@ -1,3 +1,4 @@
+{{- if .Values.global.mtls.enabled }}
 kind: Service
 apiVersion: v1
 metadata:
@@ -38,4 +39,5 @@ spec:
     port: {{ .Values.oidc.server.port }}
     targetPort: 9080
     protocol: TCP
+{{- end }}
 {{- end }}

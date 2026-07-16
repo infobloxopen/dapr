@@ -44,6 +44,9 @@ LATEST_RELEASE ?=
 
 PROTOC ?=protoc
 
+# gotestsum binary path
+GOTESTSUM ?= $(shell go env GOPATH)/bin/gotestsum
+
 # Version of "protoc" to use
 # We must also specify a protobuf "suite" version from https://github.com/protocolbuffers/protobuf/releases
 PROTOC_VERSION = 34.1
@@ -51,11 +54,19 @@ PROTOBUF_SUITE_VERSION = 34.1
 
 # name of protoc-gen-go when protoc-gen-go --version is run.
 PROTOC_GEN_GO_NAME = "protoc-gen-go"
-ifdef REL_VERSION
-	DAPR_VERSION := $(REL_VERSION)
+
+GIT_COMMIT_NUMBER = $(shell git rev-parse --short HEAD)
+GIT_DIRTY := $(shell git status --porcelain 2>/dev/null | head -1)
+ifneq ($(GIT_DIRTY),)
+  BUILD_COUNTER := $(shell cat .build-counter 2>/dev/null || echo 0)
+  DAPR_VERSION = v1.16.6-ib-$(GIT_COMMIT_NUMBER)-unreleased-j$(BUILD_COUNTER)
 else
-	DAPR_VERSION := edge
+  DAPR_VERSION = v1.16.6-ib-$(GIT_COMMIT_NUMBER)
 endif
+REPO         := infoblox
+DAPR_TAG ?= $(DAPR_VERSION)
+TARGET_OS ?= linux
+TARGET_ARCH ?= amd64
 
 LOCAL_ARCH := $(shell uname -m)
 ifeq ($(LOCAL_ARCH),x86_64)
@@ -322,7 +333,7 @@ release-flavor: build archive-flavor
 .PHONY: test
 test: test-deps
 	CGO_ENABLED=$(CGO) \
-		gotestsum \
+		$(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_unit.json \
 			--format pkgname-and-test-fails \
 			-- \
@@ -392,7 +403,7 @@ endif
 
 .PHONY: test-integration
 test-integration: test-deps
-		CGO_ENABLED=1 gotestsum \
+		CGO_ENABLED=1 $(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_integration.json \
 			--format testname \
 			-- \
@@ -400,7 +411,7 @@ test-integration: test-deps
 
 .PHONY: test-integration-parallel
 test-integration-parallel: test-deps
-		CGO_ENABLED=1 gotestsum \
+		CGO_ENABLED=1 $(GOTESTSUM) \
 			--jsonfile $(TEST_OUTPUT_FILE_PREFIX)_integration.json \
 			--format testname \
 			-- \
@@ -601,3 +612,80 @@ include docker/docker.mk
 # Target: tests                                                                #
 ################################################################################
 include tests/dapr_tests.mk
+
+
+# release target: build and archive
+.PHONY: release
+release: build archive
+
+# tidy target for go mod tidy
+.PHONY: tidy
+tidy:
+	go mod tidy
+
+# show-images target for finalizeBuild
+.PHONY: show-images
+show-images:
+	@echo "$(REPO)/dapr:$(DAPR_TAG) $(REPO)/daprd:$(DAPR_TAG) $(REPO)/placement:$(DAPR_TAG) $(REPO)/sentry:$(DAPR_TAG) $(REPO)/operator:$(DAPR_TAG) $(REPO)/injector:$(DAPR_TAG) $(REPO)/scheduler:$(DAPR_TAG)"
+
+# clean target for docker images
+.PHONY: clean
+clean:
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/dapr:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/daprd:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/placement:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/sentry:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/operator:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/injector:$(DAPR_TAG)) 2>/dev/null || true
+	-$(DOCKER) rmi -f $$(docker images -q $(REPO)/scheduler:$(DAPR_TAG)) 2>/dev/null || true
+
+################################################################################
+# Target: dev-docker-build, dev-docker-push                                    #
+# Build and push images to Harbor dev registry                                 #
+################################################################################
+DEV_REGISTRY ?= harbor.services.sdp.infoblox.com/infobloxcto-dev
+DEV_TAG ?= $(DAPR_VERSION)
+DEV_TARGET_ARCH ?= amd64
+DEV_BIN_PATH = $(OUT_DIR)/linux_$(DEV_TARGET_ARCH)/release
+
+# Dev build linux binaries for target architecture (default: amd64)
+.PHONY: dev-build-linux
+dev-build-linux:
+	@# Increment build counter for unreleased builds
+	@if [ -n "$$(git status --porcelain 2>/dev/null)" ]; then \
+		counter=$$(cat .build-counter 2>/dev/null || echo -1); \
+		counter=$$((counter + 1)); \
+		echo $$counter > .build-counter; \
+		echo "Build counter: j$$counter"; \
+	fi
+	$(info Building linux binaries for $(DEV_TARGET_ARCH)...)
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/daprd ./cmd/daprd/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/placement ./cmd/placement/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/operator ./cmd/operator/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/injector ./cmd/injector/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/sentry ./cmd/sentry/
+	CGO_ENABLED=$(CGO) GOOS=linux GOARCH=$(DEV_TARGET_ARCH) go build $(GCFLAGS) -ldflags=$(LDFLAGS) -tags=$(DAPR_GO_BUILD_TAGS) -o $(DEV_BIN_PATH)/scheduler ./cmd/scheduler/
+
+# Dev docker build - builds amd64 images for Harbor dev registry
+.PHONY: dev-docker-build
+dev-docker-build: dev-build-linux
+	$(info Building dev images for $(DEV_REGISTRY) (linux/$(DEV_TARGET_ARCH))...)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=* -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/dapr:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=daprd -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/daprd:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=placement -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/placement:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=sentry -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/sentry:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=operator -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/operator:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=injector -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/injector:$(DEV_TAG)
+	$(DOCKER) build --platform linux/$(DEV_TARGET_ARCH) --output type=docker --build-arg PKG_FILES=scheduler -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(DEV_BIN_PATH) -t $(DEV_REGISTRY)/scheduler:$(DEV_TAG)
+
+# Dev docker push - pushes images to Harbor dev registry
+.PHONY: dev-docker-push
+dev-docker-push: dev-docker-build
+	$(info Pushing dev images to $(DEV_REGISTRY)...)
+	$(DOCKER) push $(DEV_REGISTRY)/dapr:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/daprd:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/placement:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/sentry:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/operator:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/injector:$(DEV_TAG)
+	$(DOCKER) push $(DEV_REGISTRY)/scheduler:$(DEV_TAG)

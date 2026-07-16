@@ -90,6 +90,8 @@ ifeq ($(MANIFEST_LATEST_TAG),)
 endif
 
 LINUX_BINS_OUT_DIR=$(OUT_DIR)/linux_$(GOARCH)
+# Use DAPR_REGISTRY if set, otherwise fall back to REPO
+DAPR_REGISTRY ?= $(REPO)
 DOCKER_IMAGE=$(DAPR_REGISTRY)/$(DAPR_SYSTEM_IMAGE_NAME)
 DAPR_RUNTIME_DOCKER_IMAGE=$(DAPR_REGISTRY)/$(DAPR_RUNTIME_IMAGE_NAME)
 DAPR_PLACEMENT_DOCKER_IMAGE=$(DAPR_REGISTRY)/$(DAPR_PLACEMENT_IMAGE_NAME)
@@ -97,7 +99,7 @@ DAPR_SENTRY_DOCKER_IMAGE=$(DAPR_REGISTRY)/$(DAPR_SENTRY_IMAGE_NAME)
 DAPR_OPERATOR_DOCKER_IMAGE=$(DAPR_REGISTRY)/$(DAPR_OPERATOR_IMAGE_NAME)
 DAPR_INJECTOR_DOCKER_IMAGE=$(DAPR_REGISTRY)/$(DAPR_INJECTOR_IMAGE_NAME)
 DAPR_SCHEDULER_DOCKER_IMAGE=$(DAPR_REGISTRY)/$(DAPR_SCHEDULER_IMAGE_NAME)
-BUILD_TAG=$(DAPR_TAG)-$(DOCKER_IMAGE_VARIANT)
+BUILD_TAG=$(DAPR_TAG)
 
 # To use buildx: https://github.com/docker/buildx#docker-ce
 export DOCKER_CLI_EXPERIMENTAL=enabled
@@ -110,6 +112,7 @@ endif
 ifeq ($(DAPR_TAG),)
 	$(error DAPR_TAG environment variable must be set)
 endif
+	@echo "Using DAPR_REGISTRY=$(DAPR_REGISTRY) DAPR_TAG=$(DAPR_TAG)"
 
 check-arch:
 ifeq ($(TARGET_OS),)
@@ -193,15 +196,6 @@ else
 	if [[ "$(BINARIES)" == *"sentry"* ]]; then \
 		$(DOCKER) push $(DAPR_SENTRY_DOCKER_IMAGE):$(BUILD_TAG); \
 	fi
-	if [[ "$(BINARIES)" == *"operator"* ]]; then \
-		$(DOCKER) push $(DAPR_OPERATOR_DOCKER_IMAGE):$(BUILD_TAG); \
-	fi
-	if [[ "$(BINARIES)" == *"injector"* ]]; then \
-		$(DOCKER) push $(DAPR_INJECTOR_DOCKER_IMAGE):$(BUILD_TAG); \
-	fi
-	if [[ "$(BINARIES)" == *"scheduler"* ]]; then \
-		$(DOCKER) push $(DAPR_SCHEDULER_DOCKER_IMAGE):$(BUILD_TAG); \
-	fi
 endif
 else
 	-$(DOCKER) run --privileged --rm tonistiigi/binfmt:qemu-v7.0.0 --install all
@@ -219,15 +213,6 @@ else
 	fi
 	if [[ "$(BINARIES)" == *"sentry"* ]]; then \
 		$(DOCKER) buildx build --build-arg PKG_FILES=sentry --platform $(DOCKER_IMAGE_PLATFORM) -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(BIN_PATH) -t $(DAPR_SENTRY_DOCKER_IMAGE):$(BUILD_TAG) --provenance=false --push; \
-	fi
-	if [[ "$(BINARIES)" == *"operator"* ]]; then \
-		$(DOCKER) buildx build --build-arg PKG_FILES=operator --platform $(DOCKER_IMAGE_PLATFORM) -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(BIN_PATH) -t $(DAPR_OPERATOR_DOCKER_IMAGE):$(BUILD_TAG) --provenance=false --push; \
-	fi
-	if [[ "$(BINARIES)" == *"injector"* ]]; then \
-		$(DOCKER) buildx build --build-arg PKG_FILES=injector --platform $(DOCKER_IMAGE_PLATFORM) -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(BIN_PATH) -t $(DAPR_INJECTOR_DOCKER_IMAGE):$(BUILD_TAG) --provenance=false --push; \
-	fi
-	if [[ "$(BINARIES)" == *"scheduler"* ]]; then \
-		$(DOCKER) buildx build --build-arg PKG_FILES=scheduler --platform $(DOCKER_IMAGE_PLATFORM) -f $(DOCKERFILE_DIR)/$(DOCKERFILE) $(BIN_PATH) -t $(DAPR_SCHEDULER_DOCKER_IMAGE):$(BUILD_TAG) --provenance=false --push; \
 	fi
 endif
 endif

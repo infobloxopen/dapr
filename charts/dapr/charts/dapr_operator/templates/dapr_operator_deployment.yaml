@@ -116,9 +116,16 @@ spec:
         resources:
 {{ toYaml .Values.resources | indent 10 }}
         volumeMounts:
+      {{- if .Values.global.mtls.enabled }}
         - name: dapr-trust-bundle
           mountPath: /var/run/secrets/dapr.io/tls
           readOnly: true
+      {{- end }}
+      {{- if not .Values.global.mtls.enabled }}
+        - name: dapr-operator-cert
+          mountPath: /tmp/k8s-webhook-server/serving-certs
+          readOnly: true
+      {{- end }}
       {{- if .Values.global.mtls.mountSentryVolume }}
         - name: dapr-identity-token
           mountPath: /var/run/secrets/dapr.io/sentrytoken
@@ -155,8 +162,10 @@ spec:
         - "{{ .Values.maxPodRestartsPerMinute }}"
         - "--log-level"
         - "{{ .Values.logLevel }}"
+{{- if .Values.global.mtls.enabled }}
         - "--trust-anchors-file"
         - "/var/run/secrets/dapr.io/tls/ca.crt"
+{{- end }}
 {{- if eq .Values.global.logAsJson true }}
         - "--log-as-json"
 {{- end }}
@@ -177,8 +186,14 @@ spec:
 {{- if .Values.global.argoRolloutServiceReconciler.enabled }}
         - "--enable-argo-rollout-service-reconciler"
 {{- end }}
+{{- if .Values.disableLeaderElection }}
+        - "--disable-leader-election"
+{{- end }}
 {{- if .Values.global.operator.watchdogCanPatchPodLabels }}
         - "--watchdog-can-patch-pod-labels"
+{{- end }}
+{{- if not .Values.global.mtls.enabled }}
+        - "--enable-mtls=false"
 {{- end }}
       serviceAccountName: dapr-operator
       volumes:
@@ -186,9 +201,16 @@ spec:
           emptyDir:
             sizeLimit: 64Mi
             medium: Memory
+    {{- if .Values.global.mtls.enabled }}
         - name: dapr-trust-bundle
           configMap:
             name: dapr-trust-bundle
+    {{- end }}
+    {{- if not .Values.global.mtls.enabled }}
+        - name: dapr-operator-cert
+          secret:
+            secretName: dapr-operator-cert
+    {{- end }}
     {{- if .Values.global.mtls.mountSentryVolume }}
         - name: dapr-identity-token
           projected:

@@ -65,12 +65,21 @@ func (c *SidecarConfig) getSidecarContainer(opts getSidecarContainerOpts) (*core
 		"--dapr-grpc-port", strconv.FormatInt(int64(c.SidecarAPIGRPCPort), 10),
 		"--dapr-internal-grpc-port", strconv.FormatInt(int64(c.SidecarInternalGRPCPort), 10),
 		"--dapr-listen-addresses", c.SidecarListenAddresses,
-		"--dapr-public-port", strconv.FormatInt(int64(c.SidecarPublicPort), 10),
+	}
+	if c.SidecarPublicPort != 0 {
+		args = append(args, "--dapr-public-port", strconv.FormatInt(int64(c.SidecarPublicPort), 10))
+	} else if !c.pod.Spec.HostNetwork {
+		// Non-hostNetwork pods need a public port for kubelet probes because the HTTP
+		// port only listens on the pod's loopback (unreachable from the host netns).
+		// Use the legacy default 3501; this is safe since each pod has its own netns.
+		args = append(args, "--dapr-public-port", "3501")
+	}
+	args = append(args,
 		"--app-id", c.GetAppID(),
 		"--app-protocol", c.AppProtocol,
 		"--log-level", c.LogLevel,
 		"--dapr-graceful-shutdown-seconds", strconv.Itoa(c.GracefulShutdownSeconds),
-	}
+	)
 
 	// Mode is omitted if it's an unsupported value
 	switch c.Mode {
@@ -249,8 +258,22 @@ func (c *SidecarConfig) getSidecarContainer(opts getSidecarContainerOpts) (*core
 	}
 
 	// Create the container object
-	readinessProbeHandler := getReadinessProbeHandler(c.SidecarPublicPort, injectorConsts.APIVersionV1, injectorConsts.SidecarHealthzPath)
-	livenessProbeHandler := getLivenessProbeHandler(c.SidecarPublicPort)
+	probePort := c.SidecarPublicPort
+	probeHost := "" // empty = kubelet uses pod IP (public port listens on all interfaces)
+	if probePort == 0 {
+		if c.pod.Spec.HostNetwork {
+			// hostNetwork: kubelet shares the pod's network namespace, so it can
+			// reach daprd's loopback-only HTTP port directly.
+			probePort = c.SidecarHTTPPort
+			probeHost = "127.0.0.1"
+		} else {
+			// Non-hostNetwork: kubelet cannot reach the pod's loopback. We passed
+			// --dapr-public-port 3501 above, so probe that (all-interfaces).
+			probePort = 3501
+		}
+	}
+	readinessProbeHandler := getReadinessProbeHandler(probePort, probeHost, injectorConsts.APIVersionV1, injectorConsts.SidecarHealthzPath)
+	livenessProbeHandler := getLivenessProbeHandler(probePort, probeHost)
 	env := []corev1.EnvVar{
 		{
 			Name:  "NAMESPACE",
@@ -584,18 +607,20 @@ func (c *SidecarConfig) GetAppProtocol() string {
 	}
 }
 
-func getReadinessProbeHandler(port int32, pathElements ...string) corev1.ProbeHandler {
+func getReadinessProbeHandler(port int32, host string, pathElements ...string) corev1.ProbeHandler {
 	return corev1.ProbeHandler{
 		HTTPGet: &corev1.HTTPGetAction{
 			Path: formatProbePath(pathElements...),
+			Host: host,
 			Port: intstr.IntOrString{IntVal: port},
 		},
 	}
 }
 
-func getLivenessProbeHandler(port int32) corev1.ProbeHandler {
+func getLivenessProbeHandler(port int32, host string) corev1.ProbeHandler {
 	return corev1.ProbeHandler{
 		TCPSocket: &corev1.TCPSocketAction{
+			Host: host,
 			Port: intstr.IntOrString{IntVal: port},
 		},
 	}
