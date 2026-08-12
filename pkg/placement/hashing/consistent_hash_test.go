@@ -358,6 +358,54 @@ func TestMaxLoad(t *testing.T) {
 	})
 }
 
+func TestLoadOK(t *testing.T) {
+	SetReplicationFactor(10)
+
+	t.Run("negative totalLoad returns true", func(t *testing.T) {
+		c := NewConsistentHash()
+		c.Add("host1", "app1", 3000)
+
+		// Force totalLoad to a negative value (simulating excessive Done calls)
+		// We do this via Done on a host with zero load
+		c.Done("host1")
+		_, _, _, totalLoad := c.GetInternals()
+		assert.True(t, totalLoad < 0, "totalLoad should be negative, got %d", totalLoad)
+
+		// loadOK should still return true because the safety check resets totalLoad
+		ok := c.loadOK("host1")
+		assert.True(t, ok)
+	})
+
+	t.Run("load within threshold returns true", func(t *testing.T) {
+		c := NewConsistentHash()
+		c.Add("host1", "app1", 3000)
+		c.Add("host2", "app2", 3001)
+
+		// Both hosts at load 0, totalLoad = 0
+		// loadOK computes: (0+1)/2 = 0 -> set to 1, ceil(1*1.25) = 2
+		// host load is 0, 0+1=1 <= 2 -> true
+		ok := c.loadOK("host1")
+		assert.True(t, ok)
+	})
+
+	t.Run("load exceeds threshold returns false", func(t *testing.T) {
+		c := NewConsistentHash()
+		c.Add("host1", "app1", 3000)
+		c.Add("host2", "app2", 3001)
+
+		// Put heavy load on host1
+		// After many increments, host1's load will exceed the threshold
+		for i := 0; i < 50; i++ {
+			c.Inc("host1")
+		}
+		// totalLoad = 50, numHosts = 2
+		// loadOK computes: (50+1)/2 = 25, ceil(25*1.25) = ceil(31.25) = 32
+		// host1.Load = 50, 50+1=51 > 32 -> false
+		ok := c.loadOK("host1")
+		assert.False(t, ok)
+	})
+}
+
 func TestGetHost(t *testing.T) {
 	SetReplicationFactor(10)
 
