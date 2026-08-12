@@ -198,3 +198,55 @@ func TestToLogrusLevel(t *testing.T) {
 		assert.Equal(t, logrus.FatalLevel, toLogrusLevel(FatalLevel))
 	})
 }
+
+func TestWarnLog(t *testing.T) {
+	t.Run("warn outputs message", func(t *testing.T) {
+		var buf bytes.Buffer
+		testLogger := getTestLogger(&buf)
+		testLogger.EnableJSONOutput(true)
+		testLogger.SetOutputLevel(DebugLevel)
+
+		testLogger.Warn("test warning")
+
+		b, _ := buf.ReadBytes('\n')
+		var o map[string]interface{}
+		json.Unmarshal(b, &o)
+		assert.Equal(t, "warning", o[logFieldLevel])
+		assert.Equal(t, "test warning", o[logFieldMessage])
+	})
+
+	t.Run("warnf outputs formatted message", func(t *testing.T) {
+		var buf bytes.Buffer
+		testLogger := getTestLogger(&buf)
+		testLogger.EnableJSONOutput(true)
+		testLogger.SetOutputLevel(DebugLevel)
+
+		testLogger.Warnf("test %s", "warning")
+
+		b, _ := buf.ReadBytes('\n')
+		var o map[string]interface{}
+		json.Unmarshal(b, &o)
+		assert.Equal(t, "warning", o[logFieldLevel])
+		assert.Equal(t, "test warning", o[logFieldMessage])
+	})
+}
+
+func TestSetOutputLevel(t *testing.T) {
+	t.Run("set output level to debug", func(t *testing.T) {
+		var buf bytes.Buffer
+		testLogger := getTestLogger(&buf)
+		testLogger.SetOutputLevel(DebugLevel)
+
+		testLogger.Debug("debug msg")
+		assert.True(t, buf.Len() > 0)
+	})
+
+	t.Run("debug messages hidden at info level", func(t *testing.T) {
+		var buf bytes.Buffer
+		testLogger := getTestLogger(&buf)
+		testLogger.SetOutputLevel(InfoLevel)
+
+		testLogger.Debug("debug msg")
+		assert.Equal(t, 0, buf.Len())
+	})
+}

@@ -347,3 +347,125 @@ func TestProtobufToJSON(t *testing.T) {
 	comp2 := string(jsonBody) == "{\"stackEntries\":[\"first stack\", \"second stack\"]}"
 	assert.True(t, comp1 || comp2)
 }
+
+func TestHTTPStatusFromCode(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     codes.Code
+		expected int
+	}{
+		{"OK", codes.OK, 200},
+		{"Canceled", codes.Canceled, 408},
+		{"Unknown", codes.Unknown, 500},
+		{"InvalidArgument", codes.InvalidArgument, 400},
+		{"DeadlineExceeded", codes.DeadlineExceeded, 504},
+		{"NotFound", codes.NotFound, 404},
+		{"AlreadyExists", codes.AlreadyExists, 409},
+		{"PermissionDenied", codes.PermissionDenied, 403},
+		{"Unauthenticated", codes.Unauthenticated, 401},
+		{"ResourceExhausted", codes.ResourceExhausted, 429},
+		{"FailedPrecondition", codes.FailedPrecondition, 400},
+		{"Aborted", codes.Aborted, 409},
+		{"OutOfRange", codes.OutOfRange, 400},
+		{"Unimplemented", codes.Unimplemented, 501},
+		{"Internal", codes.Internal, 500},
+		{"Unavailable", codes.Unavailable, 503},
+		{"DataLoss", codes.DataLoss, 500},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, HTTPStatusFromCode(tt.code))
+		})
+	}
+}
+
+func TestCodeFromHTTPStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		expected codes.Code
+	}{
+		{"OK 200", 200, codes.OK},
+		{"Created 201", 201, codes.OK},
+		{"RequestTimeout", 408, codes.Canceled},
+		{"InternalServerError", 500, codes.Unknown},
+		{"BadRequest", 400, codes.Internal},
+		{"GatewayTimeout", 504, codes.DeadlineExceeded},
+		{"NotFound", 404, codes.NotFound},
+		{"Conflict", 409, codes.AlreadyExists},
+		{"Forbidden", 403, codes.PermissionDenied},
+		{"Unauthorized", 401, codes.Unauthenticated},
+		{"TooManyRequests", 429, codes.ResourceExhausted},
+		{"NotImplemented", 501, codes.Unimplemented},
+		{"ServiceUnavailable", 503, codes.Unavailable},
+		{"Unmapped status", 999, codes.Unknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, CodeFromHTTPStatus(tt.status))
+		})
+	}
+}
+
+func TestIsPermanentHTTPHeader(t *testing.T) {
+	tests := []struct {
+		header   string
+		expected bool
+	}{
+		{"Accept", true},
+		{"Content-Type", true},
+		{"Connection", true},
+		{"Keep-Alive", true},
+		{"Cookie", true},
+		{"Host", true},
+		{"X-Custom-Header", false},
+		{"Authorization", false},
+		{"User-Agent", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.header, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isPermanentHTTPHeader(tt.header))
+		})
+	}
+}
+
+func TestReservedGRPCMetadataToDaprPrefixHeader(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		expected string
+	}{
+		{"method", ":method", "dapr-method"},
+		{"scheme", ":scheme", "dapr-scheme"},
+		{"path", ":path", "dapr-path"},
+		{"authority", ":authority", "dapr-authority"},
+		{"grpc prefix", "grpc-timeout", "dapr-grpc-timeout"},
+		{"normal key", "custom-key", "custom-key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, reservedGRPCMetadataToDaprPrefixHeader(tt.key))
+		})
+	}
+}
+
+func TestIsGRPCProtocol(t *testing.T) {
+	t.Run("grpc content type", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			ContentTypeHeader: &internalv1pb.ListStringValue{Values: []string{GRPCContentType}},
+		}
+		assert.True(t, IsGRPCProtocol(md))
+	})
+
+	t.Run("json content type", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			ContentTypeHeader: &internalv1pb.ListStringValue{Values: []string{JSONContentType}},
+		}
+		assert.False(t, IsGRPCProtocol(md))
+	})
+
+	t.Run("empty metadata", func(t *testing.T) {
+		md := DaprInternalMetadata{}
+		assert.False(t, IsGRPCProtocol(md))
+	})
+}

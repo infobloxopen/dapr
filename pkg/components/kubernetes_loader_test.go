@@ -62,6 +62,24 @@ func getOperatorClient(address string) operatorv1pb.OperatorClient {
 	return operatorv1pb.NewOperatorClient(conn)
 }
 
+func TestNewKubernetesComponents(t *testing.T) {
+	t.Run("creates kubernetes loader with config and client", func(t *testing.T) {
+		cfg := config.KubernetesConfig{ControlPlaneAddress: "localhost:5000"}
+		loader := NewKubernetesComponents(cfg, nil)
+		assert.NotNil(t, loader)
+		assert.Equal(t, "localhost:5000", loader.config.ControlPlaneAddress)
+		assert.Nil(t, loader.client)
+	})
+
+	t.Run("creates kubernetes loader with mock client", func(t *testing.T) {
+		cfg := config.KubernetesConfig{ControlPlaneAddress: "localhost:6000"}
+		client := getOperatorClient("localhost:6000")
+		loader := NewKubernetesComponents(cfg, client)
+		assert.NotNil(t, loader)
+		assert.NotNil(t, loader.client)
+	})
+}
+
 func TestLoadComponents(t *testing.T) {
 	port, _ := freeport.GetFreePort()
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))

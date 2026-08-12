@@ -12,6 +12,7 @@ import (
 	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
 	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -141,5 +142,46 @@ func TestIsHTTPResponse(t *testing.T) {
 	t.Run("HTTP response status", func(t *testing.T) {
 		httpResp := NewInvokeMethodResponse(http.StatusOK, "OK", nil)
 		assert.True(t, httpResp.IsHTTPResponse())
+	})
+}
+
+func TestResponseProto(t *testing.T) {
+	t.Run("returns internal proto", func(t *testing.T) {
+		resp := NewInvokeMethodResponse(200, "OK", nil)
+		proto := resp.Proto()
+		require.NotNil(t, proto)
+		assert.Equal(t, int32(200), proto.GetStatus().GetCode())
+	})
+}
+
+func TestResponseMessage(t *testing.T) {
+	t.Run("returns message", func(t *testing.T) {
+		resp := NewInvokeMethodResponse(200, "OK", nil)
+		msg := resp.Message()
+		require.NotNil(t, msg)
+	})
+}
+
+func TestResponseStatus(t *testing.T) {
+	t.Run("returns status", func(t *testing.T) {
+		resp := NewInvokeMethodResponse(200, "OK", nil)
+		status := resp.Status()
+		require.NotNil(t, status)
+		assert.Equal(t, int32(200), status.GetCode())
+		assert.Equal(t, "OK", status.GetMessage())
+	})
+}
+
+func TestResponseRawDataNilMessage(t *testing.T) {
+	t.Run("nil message returns empty", func(t *testing.T) {
+		resp := &InvokeMethodResponse{
+			r: &internalv1pb.InternalInvokeResponse{
+				Status:  &internalv1pb.Status{Code: 200},
+				Message: nil,
+			},
+		}
+		ct, data := resp.RawData()
+		assert.Equal(t, "", ct)
+		assert.Nil(t, data)
 	})
 }
