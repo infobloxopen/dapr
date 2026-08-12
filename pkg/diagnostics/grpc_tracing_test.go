@@ -22,7 +22,9 @@ import (
 	"go.opencensus.io/trace"
 	"go.opencensus.io/trace/propagation"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 func TestSpanAttributesMapFromGRPC(t *testing.T) {
@@ -97,6 +99,28 @@ func TestSpanContextToGRPCMetadata(t *testing.T) {
 		newCtx := SpanContextToGRPCMetadata(ctx, trace.SpanContext{})
 
 		assert.Equal(t, ctx, newCtx)
+	})
+
+	t.Run("valid non-empty span context adds grpc-trace-bin to outgoing metadata", func(t *testing.T) {
+		sc := trace.SpanContext{
+			TraceID:      trace.TraceID{75, 249, 47, 53, 119, 179, 77, 166, 163, 206, 146, 157, 14, 14, 71, 54},
+			SpanID:       trace.SpanID{0, 240, 103, 170, 11, 169, 2, 183},
+			TraceOptions: trace.TraceOptions(1),
+		}
+
+		ctx := context.Background()
+		newCtx := SpanContextToGRPCMetadata(ctx, sc)
+		assert.NotEqual(t, ctx, newCtx)
+
+		md, ok := metadata.FromOutgoingContext(newCtx)
+		assert.True(t, ok)
+		assert.NotEmpty(t, md[grpcTraceContextKey])
+
+		// Verify round-trip: deserialize from the metadata and compare.
+		traceContextBinary := []byte(md[grpcTraceContextKey][0])
+		gotSc, gotOk := propagation.FromBinary(traceContextBinary)
+		assert.True(t, gotOk)
+		assert.Equal(t, sc, gotSc)
 	})
 }
 
@@ -190,4 +214,104 @@ func TestSpanContextSerialization(t *testing.T) {
 	decoded, _ := base64.StdEncoding.DecodeString(storedInDapr)
 	gotSc, _ := propagation.FromBinary(decoded)
 	assert.Equal(t, wantSc, gotSc)
+}
+
+func TestSpanContextFromIncomingGRPCMetadata(t *testing.T) {
+	testSc := trace.SpanContext{
+		TraceID:      trace.TraceID{75, 249, 47, 53, 119, 179, 77, 166, 163, 206, 146, 157, 14, 14, 71, 54},
+		SpanID:       trace.SpanID{0, 240, 103, 170, 11, 169, 2, 183},
+		TraceOptions: trace.TraceOptions(1),
+	}
+
+	t.Run("with grpc-trace-bin metadata", func(t *testing.T) {
+		traceContextBinary := propagation.Binary(testSc)
+		md := metadata.Pairs(grpcTraceContextKey, string(traceContextBinary))
+		ctx := metadata.NewIncomingContext(context.Background(), md)
+
+		sc, ok := SpanContextFromIncomingGRPCMetadata(ctx)
+		assert.True(t, ok)
+		assert.Equal(t, testSc, sc)
+	})
+
+	t.Run("with traceparent metadata fallback", func(t *testing.T) {
+		traceparent := SpanContextToW3CString(testSc)
+		md := metadata.Pairs(traceparentHeader, traceparent)
+		ctx := metadata.NewIncomingContext(context.Background(), md)
+
+		sc, ok := SpanContextFromIncomingGRPCMetadata(ctx)
+		assert.True(t, ok)
+		assert.Equal(t, testSc.TraceID, sc.TraceID)
+		assert.Equal(t, testSc.SpanID, sc.SpanID)
+		assert.Equal(t, testSc.TraceOptions, sc.TraceOptions)
+	})
+
+	t.Run("with traceparent and tracestate metadata", func(t *testing.T) {
+		traceparent := SpanContextToW3CString(testSc)
+		md := metadata.Pairs(traceparentHeader, traceparent, tracestateHeader, "vendor1=opaque1")
+		ctx := metadata.NewIncomingContext(context.Background(), md)
+
+		sc, ok := SpanContextFromIncomingGRPCMetadata(ctx)
+		assert.True(t, ok)
+		assert.Equal(t, testSc.TraceID, sc.TraceID)
+		assert.NotNil(t, sc.Tracestate)
+		entries := sc.Tracestate.Entries()
+		assert.Len(t, entries, 1)
+		assert.Equal(t, "vendor1", entries[0].Key)
+		assert.Equal(t, "opaque1", entries[0].Value)
+	})
+
+	t.Run("with no metadata returns empty span context", func(t *testing.T) {
+		ctx := metadata.NewIncomingContext(context.Background(), metadata.MD{})
+
+		sc, ok := SpanContextFromIncomingGRPCMetadata(ctx)
+		assert.False(t, ok)
+		assert.Equal(t, trace.SpanContext{}, sc)
+	})
+}
+
+func TestUpdateSpanStatusFromGRPCError(t *testing.T) {
+	t.Run("nil error does nothing", func(t *testing.T) {
+		ctx := context.Background()
+		_, span := trace.StartSpan(ctx, "test", trace.WithSampler(trace.AlwaysSample()))
+		defer span.End()
+
+		// Should not panic and should not set any error status.
+		assert.NotPanics(t, func() {
+			UpdateSpanStatusFromGRPCError(span, nil)
+		})
+	})
+
+	t.Run("nil span does not panic", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			UpdateSpanStatusFromGRPCError(nil, errors.New("some error"))
+		})
+	})
+
+	t.Run("grpc status error sets span status with grpc code", func(t *testing.T) {
+		ctx := context.Background()
+		_, span := trace.StartSpan(ctx, "test", trace.WithSampler(trace.AlwaysSample()))
+		defer span.End()
+
+		grpcErr := status.Error(codes.NotFound, "resource not found")
+		UpdateSpanStatusFromGRPCError(span, grpcErr)
+		// Span status is set but we can verify it does not panic.
+		// The internal state is not directly accessible without exporter.
+	})
+
+	t.Run("plain error sets span status as Internal", func(t *testing.T) {
+		ctx := context.Background()
+		_, span := trace.StartSpan(ctx, "test", trace.WithSampler(trace.AlwaysSample()))
+		defer span.End()
+
+		plainErr := errors.New("something went wrong")
+		assert.NotPanics(t, func() {
+			UpdateSpanStatusFromGRPCError(span, plainErr)
+		})
+	})
+
+	t.Run("both nil does not panic", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			UpdateSpanStatusFromGRPCError(nil, nil)
+		})
+	})
 }

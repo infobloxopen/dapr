@@ -1,0 +1,17 @@
+name: PR Coverage Report
+
+on:
+  pull_request:
+    branches:
+      - v1.0.0-ib
+      - main
+      - 'release/**'
+    types: [opened, synchronize, reopened]
+
+jobs:
+  coverage:
+    uses: Infoblox-CTO/github-workflows/.github/workflows/pr-coverage.yaml@main
+    with:
+      goprivate: github.com/Infoblox-CTO/*,github.com/infobloxopen/*
+      module_prefix: github.com/dapr/dapr
+    secrets: inherit

@@ -1,6 +1,7 @@
 package diagnostics
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -9,6 +10,28 @@ import (
 	"github.com/valyala/fasthttp"
 	"go.opencensus.io/stats/view"
 )
+
+func TestHTTPMetricsClientMethods(t *testing.T) {
+	h := newHTTPMetrics()
+	assert.False(t, h.IsEnabled())
+
+	h.Init("fakeID-client")
+	assert.True(t, h.IsEnabled())
+
+	ctx := context.Background()
+
+	t.Run("ClientRequestStarted", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			h.ClientRequestStarted(ctx, "POST", "/v1/invoke/method/test", 512)
+		})
+	})
+
+	t.Run("ClientRequestCompleted", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			h.ClientRequestCompleted(ctx, "POST", "/v1/invoke/method/test", "200", 1024, 55.0)
+		})
+	})
+}
 
 func TestFastHTTPMiddleware(t *testing.T) {
 	requestBody := "fake_requestDaprBody"

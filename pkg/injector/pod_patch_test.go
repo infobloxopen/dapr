@@ -165,6 +165,172 @@ func TestImagePullPolicy(t *testing.T) {
 	}
 }
 
+func TestGetSideCarContainerMTLSEnabled(t *testing.T) {
+	t.Run("mTLS enabled with trust anchors adds cert env vars", func(t *testing.T) {
+		annotations := map[string]string{}
+		annotations[daprConfigKey] = "config"
+		annotations[daprAppPortKey] = "5000"
+
+		trustAnchors := "test-trust-anchors"
+		certChain := "test-cert-chain"
+		certKey := "test-cert-key"
+
+		container, err := getSidecarContainer(annotations, "app_id", "darpio/dapr", "Always", "dapr-system", "controlplane:9000", "placement:50000", nil, trustAnchors, certChain, certKey, "sentry:50000", true, "ns:sa")
+		assert.Nil(t, err)
+		assert.NotNil(t, container)
+
+		// Verify DAPR_TRUST_ANCHORS env var is present.
+		found := false
+		for _, env := range container.Env {
+			if env.Name == "DAPR_TRUST_ANCHORS" {
+				found = true
+				assert.Equal(t, trustAnchors, env.Value)
+				break
+			}
+		}
+		assert.True(t, found, "DAPR_TRUST_ANCHORS env var not found")
+
+		// Verify DAPR_CERT_CHAIN env var is present.
+		found = false
+		for _, env := range container.Env {
+			if env.Name == "DAPR_CERT_CHAIN" {
+				found = true
+				assert.Equal(t, certChain, env.Value)
+				break
+			}
+		}
+		assert.True(t, found, "DAPR_CERT_CHAIN env var not found")
+
+		// Verify DAPR_CERT_KEY env var is present.
+		found = false
+		for _, env := range container.Env {
+			if env.Name == "DAPR_CERT_KEY" {
+				found = true
+				assert.Equal(t, certKey, env.Value)
+				break
+			}
+		}
+		assert.True(t, found, "DAPR_CERT_KEY env var not found")
+
+		// Verify SENTRY_LOCAL_IDENTITY env var is present.
+		found = false
+		for _, env := range container.Env {
+			if env.Name == "SENTRY_LOCAL_IDENTITY" {
+				found = true
+				assert.Equal(t, "ns:sa", env.Value)
+				break
+			}
+		}
+		assert.True(t, found, "SENTRY_LOCAL_IDENTITY env var not found")
+
+		// Verify --enable-mtls arg is present.
+		found = false
+		for _, a := range container.Args {
+			if a == "--enable-mtls" {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "--enable-mtls arg not found")
+	})
+
+	t.Run("mTLS enabled but empty trust anchors skips cert env vars", func(t *testing.T) {
+		annotations := map[string]string{}
+		annotations[daprConfigKey] = "config"
+		annotations[daprAppPortKey] = "5000"
+
+		container, err := getSidecarContainer(annotations, "app_id", "darpio/dapr", "Always", "dapr-system", "controlplane:9000", "placement:50000", nil, "", "", "", "sentry:50000", true, "ns:sa")
+		assert.Nil(t, err)
+		assert.NotNil(t, container)
+
+		for _, env := range container.Env {
+			assert.NotEqual(t, "DAPR_TRUST_ANCHORS", env.Name, "DAPR_TRUST_ANCHORS should not be set when trust anchors are empty")
+		}
+
+		for _, a := range container.Args {
+			assert.NotEqual(t, "--enable-mtls", a, "--enable-mtls should not be set when trust anchors are empty")
+		}
+	})
+}
+
+func TestGetSideCarContainerWithAPITokenSecret(t *testing.T) {
+	t.Run("API token secret set adds DAPR_API_TOKEN env var", func(t *testing.T) {
+		annotations := map[string]string{}
+		annotations[daprConfigKey] = "config"
+		annotations[daprAppPortKey] = "5000"
+		annotations[daprAPITokenSecret] = "my-api-secret"
+
+		container, err := getSidecarContainer(annotations, "app_id", "darpio/dapr", "Always", "dapr-system", "controlplane:9000", "placement:50000", nil, "", "", "", "sentry:50000", false, "")
+		assert.Nil(t, err)
+		assert.NotNil(t, container)
+
+		found := false
+		for _, env := range container.Env {
+			if env.Name == "DAPR_API_TOKEN" {
+				found = true
+				assert.NotNil(t, env.ValueFrom)
+				assert.NotNil(t, env.ValueFrom.SecretKeyRef)
+				assert.Equal(t, "my-api-secret", env.ValueFrom.SecretKeyRef.Name)
+				assert.Equal(t, "token", env.ValueFrom.SecretKeyRef.Key)
+				break
+			}
+		}
+		assert.True(t, found, "DAPR_API_TOKEN env var not found")
+	})
+
+	t.Run("no API token secret skips DAPR_API_TOKEN env var", func(t *testing.T) {
+		annotations := map[string]string{}
+		annotations[daprConfigKey] = "config"
+		annotations[daprAppPortKey] = "5000"
+
+		container, err := getSidecarContainer(annotations, "app_id", "darpio/dapr", "Always", "dapr-system", "controlplane:9000", "placement:50000", nil, "", "", "", "sentry:50000", false, "")
+		assert.Nil(t, err)
+
+		for _, env := range container.Env {
+			assert.NotEqual(t, "DAPR_API_TOKEN", env.Name, "DAPR_API_TOKEN should not be set when no secret is configured")
+		}
+	})
+}
+
+func TestGetSideCarContainerWithAppTokenSecret(t *testing.T) {
+	t.Run("app token secret set adds APP_API_TOKEN env var", func(t *testing.T) {
+		annotations := map[string]string{}
+		annotations[daprConfigKey] = "config"
+		annotations[daprAppPortKey] = "5000"
+		annotations[daprAppTokenSecret] = "my-app-secret"
+
+		container, err := getSidecarContainer(annotations, "app_id", "darpio/dapr", "Always", "dapr-system", "controlplane:9000", "placement:50000", nil, "", "", "", "sentry:50000", false, "")
+		assert.Nil(t, err)
+		assert.NotNil(t, container)
+
+		found := false
+		for _, env := range container.Env {
+			if env.Name == "APP_API_TOKEN" {
+				found = true
+				assert.NotNil(t, env.ValueFrom)
+				assert.NotNil(t, env.ValueFrom.SecretKeyRef)
+				assert.Equal(t, "my-app-secret", env.ValueFrom.SecretKeyRef.Name)
+				assert.Equal(t, "token", env.ValueFrom.SecretKeyRef.Key)
+				break
+			}
+		}
+		assert.True(t, found, "APP_API_TOKEN env var not found")
+	})
+
+	t.Run("no app token secret skips APP_API_TOKEN env var", func(t *testing.T) {
+		annotations := map[string]string{}
+		annotations[daprConfigKey] = "config"
+		annotations[daprAppPortKey] = "5000"
+
+		container, err := getSidecarContainer(annotations, "app_id", "darpio/dapr", "Always", "dapr-system", "controlplane:9000", "placement:50000", nil, "", "", "", "sentry:50000", false, "")
+		assert.Nil(t, err)
+
+		for _, env := range container.Env {
+			assert.NotEqual(t, "APP_API_TOKEN", env.Name, "APP_API_TOKEN should not be set when no secret is configured")
+		}
+	})
+}
+
 func TestAddDaprEnvVarsToContainers(t *testing.T) {
 	testCases := []struct {
 		testName      string

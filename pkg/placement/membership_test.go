@@ -128,6 +128,115 @@ func TestMembershipChangeWorker(t *testing.T) {
 	cleanupServer()
 }
 
+func TestEstablishLeadership(t *testing.T) {
+	t.Run("sets hasLeadership and creates membershipCh", func(t *testing.T) {
+		// arrange
+		testServer := NewPlacementService(testRaftServer)
+		testServer.hasLeadership = false
+		testServer.faultyHostDetectDuration = faultyHostDetectDefaultDuration
+
+		// act
+		testServer.establishLeadership()
+
+		// assert
+		assert.True(t, testServer.hasLeadership)
+		assert.NotNil(t, testServer.membershipCh)
+		assert.Equal(t, membershipChangeChSize, cap(testServer.membershipCh))
+		assert.Equal(t, faultyHostDetectInitialDuration, testServer.faultyHostDetectDuration)
+	})
+
+	t.Run("idempotent call overwrites membershipCh", func(t *testing.T) {
+		// arrange
+		testServer := NewPlacementService(testRaftServer)
+
+		// act - call twice
+		testServer.establishLeadership()
+		firstCh := testServer.membershipCh
+		testServer.establishLeadership()
+
+		// assert - second call creates a new channel
+		assert.True(t, testServer.hasLeadership)
+		assert.NotNil(t, testServer.membershipCh)
+		assert.NotSame(t, firstCh, testServer.membershipCh)
+	})
+}
+
+func TestRevokeLeadership(t *testing.T) {
+	t.Run("sets hasLeadership false and cleans up heartbeats", func(t *testing.T) {
+		// arrange
+		testServer := NewPlacementService(testRaftServer)
+		testServer.hasLeadership = true
+
+		// add some heartbeats to verify cleanup
+		for i := 0; i < 3; i++ {
+			testServer.lastHeartBeat.Store(
+				fmt.Sprintf("10.0.0.%d:1001", i),
+				time.Now().UnixNano(),
+			)
+		}
+
+		// act
+		testServer.revokeLeadership()
+
+		// assert
+		assert.False(t, testServer.hasLeadership)
+
+		// verify heartbeats were cleaned up
+		heartbeatCount := 0
+		testServer.lastHeartBeat.Range(func(k, v interface{}) bool {
+			heartbeatCount++
+			return true
+		})
+		assert.Equal(t, 0, heartbeatCount)
+	})
+
+	t.Run("waits for stream connections to drain", func(t *testing.T) {
+		// arrange
+		testServer := NewPlacementService(testRaftServer)
+		testServer.hasLeadership = true
+
+		// simulate an active stream connection
+		testServer.streamConnGroup.Add(1)
+
+		done := make(chan struct{})
+		go func() {
+			testServer.revokeLeadership()
+			close(done)
+		}()
+
+		// revokeLeadership should be blocked waiting for streamConnGroup
+		select {
+		case <-done:
+			assert.Fail(t, "revokeLeadership should block until stream connections drain")
+		case <-time.After(50 * time.Millisecond):
+			// expected: still blocked
+		}
+
+		// simulate stream connection closing
+		testServer.streamConnGroup.Done()
+
+		// now revokeLeadership should complete
+		select {
+		case <-done:
+			assert.False(t, testServer.hasLeadership)
+		case <-time.After(time.Second):
+			assert.Fail(t, "revokeLeadership should have completed after stream connections drained")
+		}
+	})
+
+	t.Run("no heartbeats to clean up", func(t *testing.T) {
+		// arrange
+		testServer := NewPlacementService(testRaftServer)
+		testServer.hasLeadership = true
+
+		// act - revoke with no heartbeats stored
+		testServer.revokeLeadership()
+
+		// assert
+		assert.False(t, testServer.hasLeadership)
+	})
+}
+
 func TestCleanupHeartBeats(t *testing.T) {
 	_, testServer, cleanup := newTestPlacementServer(testRaftServer)
 	testServer.hasLeadership = true

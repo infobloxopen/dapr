@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/valyala/fasthttp"
 	"go.opencensus.io/trace"
+	"go.opencensus.io/trace/tracestate"
 )
 
 func TestSpanContextFromRequest(t *testing.T) {
@@ -276,6 +277,78 @@ func TestSpanContextToResponse(t *testing.T) {
 			assert.Equalf(t, got, tt.sc, "SpanContextToResponse() got = %v, want %v", got, tt.sc)
 		})
 	}
+}
+
+func TestTraceStatusFromHTTPCode(t *testing.T) {
+	tests := []struct {
+		httpCode     int
+		expectedCode int32
+		expectedMsg  string
+	}{
+		{200, 0, "OK"},
+		{201, 0, "OK"},
+		{204, 0, "OK"},
+		{301, 4, "DeadlineExceeded"},
+		{302, 4, "DeadlineExceeded"},
+		{400, 3, "InvalidArgument"},
+		{401, 16, "Unauthenticated"},
+		{403, 7, "PermissionDenied"},
+		{404, 5, "NotFound"},
+		{429, 8, "ResourceExhausted"},
+		{500, 13, "Internal"},
+		{501, 12, "Unimplemented"},
+		{503, 14, "Unavailable"},
+		{504, 4, "DeadlineExceeded"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("HTTP_%d", tt.httpCode), func(t *testing.T) {
+			got := traceStatusFromHTTPCode(tt.httpCode)
+			assert.Equal(t, tt.expectedCode, got.Code)
+			assert.Equal(t, tt.expectedMsg, got.Message)
+		})
+	}
+}
+
+func TestTracestateToHeader(t *testing.T) {
+	t.Run("span context with tracestate", func(t *testing.T) {
+		entry := tracestate.Entry{Key: "key1", Value: "value1"}
+		ts, err := tracestate.New(nil, entry)
+		assert.NoError(t, err)
+
+		sc := trace.SpanContext{
+			TraceID:      trace.TraceID{75, 249, 47, 53, 119, 179, 77, 166, 163, 206, 146, 157, 14, 14, 71, 54},
+			SpanID:       trace.SpanID{0, 240, 103, 170, 11, 169, 2, 183},
+			TraceOptions: trace.TraceOptions(1),
+		}
+		sc.Tracestate = ts
+
+		var gotKey, gotValue string
+		setHeader := func(k, v string) {
+			gotKey = k
+			gotValue = v
+		}
+
+		tracestateToHeader(sc, setHeader)
+		assert.Equal(t, tracestateHeader, gotKey)
+		assert.Equal(t, "key1=value1", gotValue)
+	})
+
+	t.Run("span context without tracestate does not set header", func(t *testing.T) {
+		sc := trace.SpanContext{
+			TraceID:      trace.TraceID{75, 249, 47, 53, 119, 179, 77, 166, 163, 206, 146, 157, 14, 14, 71, 54},
+			SpanID:       trace.SpanID{0, 240, 103, 170, 11, 169, 2, 183},
+			TraceOptions: trace.TraceOptions(1),
+		}
+
+		called := false
+		setHeader := func(k, v string) {
+			called = true
+		}
+
+		tracestateToHeader(sc, setHeader)
+		assert.False(t, called, "setHeader should not be called when tracestate is empty")
+	})
 }
 
 func getTestHTTPRequest() *fasthttp.Request {
