@@ -52,3 +52,44 @@ func TestHeaders(t *testing.T) {
 		assert.Equal(t, "text/plain; charset=utf-8", string(ctx.Response.Header.ContentType()))
 	})
 }
+
+func TestRespondWithError(t *testing.T) {
+	ctx := &fasthttp.RequestCtx{Request: fasthttp.Request{}}
+	respondWithError(ctx, fasthttp.StatusBadRequest, ErrorResponse{
+		ErrorCode: "ERR_BAD_REQUEST",
+		Message:   "bad request",
+	})
+
+	assert.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
+	assert.Equal(t, "application/json", string(ctx.Response.Header.ContentType()))
+	assert.Contains(t, string(ctx.Response.Body()), "ERR_BAD_REQUEST")
+	assert.Contains(t, string(ctx.Response.Body()), "bad request")
+}
+
+func TestRespondEmpty(t *testing.T) {
+	ctx := &fasthttp.RequestCtx{Request: fasthttp.Request{}}
+	respondEmpty(ctx)
+
+	assert.Equal(t, fasthttp.StatusNoContent, ctx.Response.StatusCode())
+	assert.Empty(t, ctx.Response.Body())
+}
+
+func TestRespondSetsBodyAndStatusCode(t *testing.T) {
+	ctx := &fasthttp.RequestCtx{Request: fasthttp.Request{}}
+	body := []byte(`{"key":"value"}`)
+	respond(ctx, fasthttp.StatusCreated, body)
+
+	assert.Equal(t, fasthttp.StatusCreated, ctx.Response.StatusCode())
+	assert.Equal(t, body, ctx.Response.Body())
+}
+
+func TestRespondWithETaggedJSONSetsAllFields(t *testing.T) {
+	ctx := &fasthttp.RequestCtx{Request: fasthttp.Request{}}
+	body := []byte(`{"state":"value"}`)
+	respondWithETaggedJSON(ctx, fasthttp.StatusOK, body, "etag-123")
+
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, body, ctx.Response.Body())
+	assert.Equal(t, "application/json", string(ctx.Response.Header.ContentType()))
+	assert.Equal(t, "etag-123", string(ctx.Response.Header.Peek(etagHeader)))
+}
