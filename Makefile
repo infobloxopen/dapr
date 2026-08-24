@@ -325,7 +325,7 @@ test:
 # *.pb.go files found in pkg/proto/ (includes _grpc.pb.go which also ends in .pb.go)
 # zz_generated*.go files found in pkg/apis/
 # testdata directory found in pkg/config/
-COVERAGE_EXCLUDE_PATTERNS := \.pb\. zz_generated\. /testdata/ /cmd/ /tests/ /pkg/testing/ /pkg/channel/testing/ /pkg/client/ /monitoring/ /pkg/runtime/ /pkg/grpc/api\.go /pkg/grpc/grpc\.go /pkg/grpc/server\.go /pkg/http/api\.go /pkg/http/server\.go /pkg/actors/actors\.go /pkg/operator/operator\.go /pkg/operator/api/ /pkg/operator/client/ /pkg/operator/handlers/ /pkg/sentry/sentry\.go /pkg/sentry/server/ /pkg/sentry/identity/kubernetes/ /utils/utils\.go
+COVERAGE_EXCLUDE_PATTERNS := \.pb\. zz_generated\. /testdata/ /cmd/ /tests/ /pkg/testing/ /pkg/channel/testing/ /pkg/client/ /monitoring/ /pkg/runtime/runtime\.go /pkg/runtime/cli\.go /pkg/operator/operator\.go /pkg/operator/api/ /pkg/operator/client/ /pkg/sentry/sentry\.go /pkg/sentry/server/ /utils/utils\.go
 
 ## coverage-report: merge all coverage profiles, filter generated/mock code, print stats
 .PHONY: coverage-report
