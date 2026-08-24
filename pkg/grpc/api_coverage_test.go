@@ -225,6 +225,20 @@ func (s *stubSecretStore) BulkGetSecret(req secretstores.BulkGetSecretRequest) (
 	return secretstores.BulkGetSecretResponse{}, nil
 }
 
+// stubAppChannel implements channel.AppChannel with configurable behaviour.
+type stubAppChannel struct {
+	invokeMethodFn func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error)
+	baseAddress    string
+}
+
+func (c *stubAppChannel) GetBaseAddress() string { return c.baseAddress }
+func (c *stubAppChannel) InvokeMethod(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+	if c.invokeMethodFn != nil {
+		return c.invokeMethodFn(ctx, req)
+	}
+	return invokev1.NewInvokeMethodResponse(200, "OK", nil), nil
+}
+
 // ctxWithSpan returns a context with an opencensus span attached, so that
 // diag_utils.SpanFromContext does not return nil.
 func ctxWithSpan() context.Context {
@@ -540,6 +554,436 @@ func TestApplyAccessControlPolicies(t *testing.T) {
 
 		assert.True(t, allowed)
 		assert.Empty(t, errMsg)
+	})
+}
+
+// --- CallLocal tests ---
+
+func TestCallLocalCoverage(t *testing.T) {
+	t.Run("nil appChannel returns Internal error", func(t *testing.T) {
+		a := &api{
+			id:         "test-app",
+			appChannel: nil,
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{Method: "mymethod"},
+		}
+		_, err := a.CallLocal(context.Background(), in)
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+		assert.Contains(t, err.Error(), "not initialized")
+	})
+
+	t.Run("nil Message returns InvalidArgument", func(t *testing.T) {
+		a := &api{
+			id:         "test-app",
+			appChannel: &stubAppChannel{},
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: nil,
+		}
+		_, err := a.CallLocal(context.Background(), in)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+
+	t.Run("appChannel InvokeMethod returns error", func(t *testing.T) {
+		a := &api{
+			id: "test-app",
+			appChannel: &stubAppChannel{
+				invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					return nil, errors.New("channel invoke failed")
+				},
+			},
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{Method: "mymethod"},
+		}
+		_, err := a.CallLocal(context.Background(), in)
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+		assert.Contains(t, err.Error(), "channel invoke failed")
+	})
+
+	t.Run("appChannel InvokeMethod returns success", func(t *testing.T) {
+		var capturedMethod string
+		a := &api{
+			id: "test-app",
+			appChannel: &stubAppChannel{
+				invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					capturedMethod = req.Message().Method
+					resp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
+					resp.WithRawData([]byte(`{"result":"success"}`), "application/json")
+					return resp, nil
+				},
+			},
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{Method: "doWork"},
+		}
+		resp, err := a.CallLocal(context.Background(), in)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, "doWork", capturedMethod)
+	})
+
+	t.Run("ACL deny blocks call", func(t *testing.T) {
+		a := &api{
+			id: "test-app",
+			appChannel: &stubAppChannel{
+				invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					t.Fatal("InvokeMethod should not be called when ACL denies")
+					return nil, nil
+				},
+			},
+			accessControlList: &config.AccessControlList{
+				DefaultAction: "deny",
+				TrustDomain:   "public",
+			},
+			appProtocol: "grpc",
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{Method: "/mymethod"},
+		}
+		_, err := a.CallLocal(context.Background(), in)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+	})
+
+	t.Run("ACL allow permits call", func(t *testing.T) {
+		invoked := false
+		a := &api{
+			id: "test-app",
+			appChannel: &stubAppChannel{
+				invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					invoked = true
+					return invokev1.NewInvokeMethodResponse(200, "OK", nil), nil
+				},
+			},
+			accessControlList: &config.AccessControlList{
+				DefaultAction: "allow",
+				TrustDomain:   "public",
+			},
+			appProtocol: "grpc",
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{Method: "/mymethod"},
+		}
+		resp, err := a.CallLocal(context.Background(), in)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.True(t, invoked)
+	})
+
+	t.Run("ACL with HTTP protocol and verb", func(t *testing.T) {
+		a := &api{
+			id: "test-app",
+			appChannel: &stubAppChannel{
+				invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					return invokev1.NewInvokeMethodResponse(200, "OK", nil), nil
+				},
+			},
+			accessControlList: &config.AccessControlList{
+				DefaultAction: "allow",
+				TrustDomain:   "public",
+			},
+			appProtocol: "http",
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{
+				Method: "/api/invoke",
+				HttpExtension: &commonv1pb.HTTPExtension{
+					Verb: commonv1pb.HTTPExtension_POST,
+				},
+			},
+			Metadata: invokev1.MetadataToInternalMetadata(map[string][]string{
+				"content-type": {"application/json"},
+			}),
+		}
+		resp, err := a.CallLocal(context.Background(), in)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+	})
+
+	t.Run("ACL nil skips policy check", func(t *testing.T) {
+		invoked := false
+		a := &api{
+			id: "test-app",
+			appChannel: &stubAppChannel{
+				invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					invoked = true
+					return invokev1.NewInvokeMethodResponse(200, "OK", nil), nil
+				},
+			},
+			accessControlList: nil,
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{Method: "doWork"},
+		}
+		resp, err := a.CallLocal(context.Background(), in)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.True(t, invoked)
+	})
+}
+
+// --- PublishEvent cloud event error path tests ---
+
+func TestPublishEventCloudEventCreationError(t *testing.T) {
+	t.Run("invalid cloudevent JSON returns InvalidArgument", func(t *testing.T) {
+		ps := &stubPubSub{
+			features: []pubsub.Feature{},
+		}
+
+		a := &api{
+			id: "test-app",
+			pubsubAdapter: &stubPubSubAdapter{
+				getPubSubFn: func(name string) pubsub.PubSub { return ps },
+				publishFn: func(req *pubsub.PublishRequest) error {
+					t.Fatal("Publish should not be called when cloud event creation fails")
+					return nil
+				},
+			},
+		}
+
+		// DataContentType "application/cloudevents+json" triggers FromCloudEvent
+		// which tries to unmarshal the data as JSON. Invalid JSON causes an error.
+		_, err := a.PublishEvent(ctxWithSpan(), &runtimev1pb.PublishEventRequest{
+			PubsubName:      "mypubsub",
+			Topic:           "mytopic",
+			Data:            []byte("this is not valid json{{{"),
+			DataContentType: "application/cloudevents+json",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "cannot create cloudevent")
+	})
+
+	t.Run("empty data with cloudevent content type returns error", func(t *testing.T) {
+		ps := &stubPubSub{
+			features: []pubsub.Feature{},
+		}
+
+		a := &api{
+			id: "test-app",
+			pubsubAdapter: &stubPubSubAdapter{
+				getPubSubFn: func(name string) pubsub.PubSub { return ps },
+				publishFn: func(req *pubsub.PublishRequest) error {
+					t.Fatal("Publish should not be called when cloud event creation fails")
+					return nil
+				},
+			},
+		}
+
+		// Empty body (nil data) with cloudevent content type should also
+		// fail because FromCloudEvent cannot parse an empty byte slice as JSON.
+		_, err := a.PublishEvent(ctxWithSpan(), &runtimev1pb.PublishEventRequest{
+			PubsubName:      "mypubsub",
+			Topic:           "mytopic",
+			Data:            nil,
+			DataContentType: "application/cloudevents+json",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+
+	t.Run("topic with slashes is accepted for validation", func(t *testing.T) {
+		// A topic like "/" is not empty, so it passes the empty-topic check.
+		// It then proceeds to the cloud event path. With cloud event content type
+		// and invalid JSON, the error is from cloud event creation, not topic validation.
+		ps := &stubPubSub{
+			features: []pubsub.Feature{},
+		}
+
+		a := &api{
+			id: "test-app",
+			pubsubAdapter: &stubPubSubAdapter{
+				getPubSubFn: func(name string) pubsub.PubSub { return ps },
+				publishFn: func(req *pubsub.PublishRequest) error {
+					return nil
+				},
+			},
+		}
+
+		_, err := a.PublishEvent(ctxWithSpan(), &runtimev1pb.PublishEventRequest{
+			PubsubName:      "mypubsub",
+			Topic:           "/",
+			Data:            []byte("not json{{{"),
+			DataContentType: "application/cloudevents+json",
+		})
+		// Should hit the cloud event creation error, not the empty-topic check.
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "cannot create cloudevent")
+	})
+}
+
+// --- applyAccessControlPolicies additional tests ---
+
+func TestApplyAccessControlPoliciesMore(t *testing.T) {
+	t.Run("HTTP protocol with POST verb and deny", func(t *testing.T) {
+		acl := &config.AccessControlList{
+			DefaultAction: "deny",
+			TrustDomain:   "public",
+		}
+		a := &api{
+			id:                "test-app",
+			accessControlList: acl,
+			appProtocol:       "http",
+		}
+
+		allowed, errMsg := a.applyAccessControlPolicies(
+			context.Background(),
+			"/api/v1/resource",
+			commonv1pb.HTTPExtension_POST,
+			"http",
+		)
+
+		assert.False(t, allowed)
+		assert.Contains(t, errMsg, "access control policy has denied access")
+	})
+
+	t.Run("HTTP protocol with GET verb and allow", func(t *testing.T) {
+		acl := &config.AccessControlList{
+			DefaultAction: "allow",
+			TrustDomain:   "public",
+		}
+		a := &api{
+			id:                "test-app",
+			accessControlList: acl,
+			appProtocol:       "http",
+		}
+
+		allowed, errMsg := a.applyAccessControlPolicies(
+			context.Background(),
+			"/api/v1/resource",
+			commonv1pb.HTTPExtension_GET,
+			"http",
+		)
+
+		assert.True(t, allowed)
+		assert.Empty(t, errMsg)
+	})
+
+	t.Run("HTTP protocol with PUT verb and deny", func(t *testing.T) {
+		acl := &config.AccessControlList{
+			DefaultAction: "deny",
+			TrustDomain:   "public",
+		}
+		a := &api{
+			id:                "test-app",
+			accessControlList: acl,
+			appProtocol:       "http",
+		}
+
+		allowed, errMsg := a.applyAccessControlPolicies(
+			context.Background(),
+			"/api/v1/update",
+			commonv1pb.HTTPExtension_PUT,
+			"http",
+		)
+
+		assert.False(t, allowed)
+		assert.Contains(t, errMsg, "access control policy has denied access")
+	})
+
+	t.Run("grpc protocol with default deny", func(t *testing.T) {
+		acl := &config.AccessControlList{
+			DefaultAction: "deny",
+			TrustDomain:   "td1",
+		}
+		a := &api{
+			id:                "test-app",
+			accessControlList: acl,
+			appProtocol:       "grpc",
+		}
+
+		allowed, errMsg := a.applyAccessControlPolicies(
+			context.Background(),
+			"/dapr.proto.runtime.v1.AppCallback/OnInvoke",
+			commonv1pb.HTTPExtension_NONE,
+			"grpc",
+		)
+
+		assert.False(t, allowed)
+		assert.Contains(t, errMsg, "access control policy has denied access")
+	})
+
+	t.Run("operation with duplicate slashes is normalized", func(t *testing.T) {
+		acl := &config.AccessControlList{
+			DefaultAction: "allow",
+			TrustDomain:   "public",
+		}
+		a := &api{
+			id:                "test-app",
+			accessControlList: acl,
+			appProtocol:       "http",
+		}
+
+		// Duplicate slashes should be normalized by purell.
+		allowed, errMsg := a.applyAccessControlPolicies(
+			context.Background(),
+			"/api//v1///resource",
+			commonv1pb.HTTPExtension_GET,
+			"http",
+		)
+
+		assert.True(t, allowed)
+		assert.Empty(t, errMsg)
+	})
+
+	t.Run("empty operation is normalized", func(t *testing.T) {
+		acl := &config.AccessControlList{
+			DefaultAction: "allow",
+			TrustDomain:   "public",
+		}
+		a := &api{
+			id:                "test-app",
+			accessControlList: acl,
+			appProtocol:       "grpc",
+		}
+
+		allowed, errMsg := a.applyAccessControlPolicies(
+			context.Background(),
+			"",
+			commonv1pb.HTTPExtension_NONE,
+			"grpc",
+		)
+
+		assert.True(t, allowed)
+		assert.Empty(t, errMsg)
+	})
+
+	t.Run("invalid operation URL returns normalization error", func(t *testing.T) {
+		acl := &config.AccessControlList{
+			DefaultAction: "allow",
+			TrustDomain:   "public",
+		}
+		a := &api{
+			id:                "test-app",
+			accessControlList: acl,
+			appProtocol:       "http",
+		}
+
+		// "://" is an invalid URL that purell.NormalizeURLString cannot parse,
+		// triggering the normalization error branch.
+		allowed, errMsg := a.applyAccessControlPolicies(
+			context.Background(),
+			"://",
+			commonv1pb.HTTPExtension_GET,
+			"http",
+		)
+
+		assert.False(t, allowed)
+		assert.Contains(t, errMsg, "error in method normalization")
 	})
 }
 
