@@ -52,6 +52,33 @@ func TestOptions(t *testing.T) {
 	})
 }
 
+func TestOptionsSetOutputLevel(t *testing.T) {
+	t.Run("valid levels", func(t *testing.T) {
+		validLevels := []string{"debug", "info", "warn", "error", "fatal"}
+		for _, level := range validLevels {
+			o := DefaultOptions()
+			err := o.SetOutputLevel(level)
+			assert.NoError(t, err, "expected no error for level %q", level)
+			assert.Equal(t, level, o.OutputLevel)
+		}
+	})
+
+	t.Run("invalid level returns error", func(t *testing.T) {
+		o := DefaultOptions()
+		err := o.SetOutputLevel("bogus")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "undefined Log Output Level: bogus")
+		// OutputLevel should remain unchanged
+		assert.Equal(t, defaultOutputLevel, o.OutputLevel)
+	})
+
+	t.Run("empty string returns error", func(t *testing.T) {
+		o := DefaultOptions()
+		err := o.SetOutputLevel("")
+		assert.Error(t, err)
+	})
+}
+
 func TestApplyOptionsToLoggers(t *testing.T) {
 	testOptions := Options{
 		JSONFormatEnabled: true,

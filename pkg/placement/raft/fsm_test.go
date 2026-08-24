@@ -66,6 +66,98 @@ func TestFSMApply(t *testing.T) {
 	})
 }
 
+func TestFSMApplyOldLogIndex(t *testing.T) {
+	fsm := newFSM()
+
+	// Set the state index to a value higher than the log we will apply
+	fsm.state.Index = 10
+
+	cmdLog, err := makeRaftLogCommand(MemberUpsert, DaprHostMember{
+		Name:     "127.0.0.1:3031",
+		AppID:    "anotherApp",
+		Entities: []string{"actorTypeTwo"},
+	})
+	assert.NoError(t, err)
+
+	// Apply a log with an index lower than state.Index, which should be skipped
+	resp := fsm.Apply(&raft.Log{
+		Index: 3,
+		Term:  1,
+		Type:  raft.LogCommand,
+		Data:  cmdLog,
+	})
+
+	// The old log should be skipped and return false
+	skipped, ok := resp.(bool)
+	assert.True(t, ok)
+	assert.False(t, skipped)
+
+	// No members should have been added
+	assert.Equal(t, 0, len(fsm.state.Members))
+}
+
+func TestFSMApplyUnknownCommandType(t *testing.T) {
+	fsm := newFSM()
+
+	// Create a log with an unknown command type (e.g., 255)
+	data := []byte{255, 0x01, 0x02}
+	resp := fsm.Apply(&raft.Log{
+		Index: 1,
+		Term:  1,
+		Type:  raft.LogCommand,
+		Data:  data,
+	})
+
+	// Unknown command type should return false
+	result, ok := resp.(bool)
+	assert.True(t, ok)
+	assert.False(t, result)
+}
+
+func TestFSMUpsertMemberInvalidData(t *testing.T) {
+	fsm := newFSM()
+
+	// Create a log entry with MemberUpsert command type but invalid msgpack data
+	data := make([]byte, 3)
+	data[0] = uint8(MemberUpsert)
+	data[1] = 0xFF // Invalid msgpack data
+	data[2] = 0xFF
+
+	resp := fsm.Apply(&raft.Log{
+		Index: 1,
+		Term:  1,
+		Type:  raft.LogCommand,
+		Data:  data,
+	})
+
+	// Invalid data should cause an error, and Apply should return false
+	result, ok := resp.(bool)
+	assert.True(t, ok)
+	assert.False(t, result)
+}
+
+func TestFSMRemoveMemberInvalidData(t *testing.T) {
+	fsm := newFSM()
+
+	// Create a log entry with MemberRemove command type but invalid msgpack data
+	data := make([]byte, 3)
+	data[0] = uint8(MemberRemove)
+	data[1] = 0xFF // Invalid msgpack data
+	data[2] = 0xFF
+
+	resp := fsm.Apply(&raft.Log{
+		Index: 1,
+		Term:  1,
+		Type:  raft.LogCommand,
+		Data:  data,
+	})
+
+	// Invalid data should cause an error, and Apply should return false
+	result, ok := resp.(bool)
+	assert.True(t, ok)
+	assert.False(t, result)
+}
+
 func TestRestore(t *testing.T) {
 	// arrange
 	fsm := newFSM()

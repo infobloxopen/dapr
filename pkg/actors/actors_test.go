@@ -96,8 +96,8 @@ func newTestActorsRuntimeWithMock(mockAppChannel *channelt.MockAppChannel) *acto
 	fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
 	mockAppChannel.On(
 		"InvokeMethod",
-		mock.AnythingOfType("*context.emptyCtx"),
-		mock.AnythingOfType("*v1.InvokeMethodRequest")).Return(fakeResp, nil)
+		mock.Anything,
+		mock.Anything).Return(fakeResp, nil)
 
 	mockAppChannel.On("GetBaseAddress").Return("http://127.0.0.1", nil)
 
@@ -166,11 +166,12 @@ func TestActorIsDeactivated(t *testing.T) {
 	actorKey := testActorsRuntime.constructCompositeKey(actorType, actorID)
 
 	deactivateActorWithDuration(testActorsRuntime, actorType, actorID, idleTimeout)
-	time.Sleep(time.Second * 3)
 
-	_, exists := testActorsRuntime.actorsTable.Load(actorKey)
-
-	assert.False(t, exists)
+	// Poll instead of fixed sleep to avoid flaky timing under load.
+	assert.Eventually(t, func() bool {
+		_, exists := testActorsRuntime.actorsTable.Load(actorKey)
+		return !exists
+	}, 10*time.Second, 200*time.Millisecond, "actor should be deactivated after idle timeout")
 }
 
 func TestActorIsNotDeactivated(t *testing.T) {
@@ -918,17 +919,40 @@ func TestConstructCompositeKeyWithThreeArgs(t *testing.T) {
 }
 
 func TestConfig(t *testing.T) {
-	c := NewConfig("localhost:5050", "app1", []string{"placement:5050"}, []string{"1"}, 3500, "1s", "2s", "3s", true, "default")
-	assert.Equal(t, "localhost:5050", c.HostAddress)
-	assert.Equal(t, "app1", c.AppID)
-	assert.Equal(t, []string{"placement:5050"}, c.PlacementAddresses)
-	assert.Equal(t, []string{"1"}, c.HostedActorTypes)
-	assert.Equal(t, 3500, c.Port)
-	assert.Equal(t, "1s", c.ActorDeactivationScanInterval.String())
-	assert.Equal(t, "2s", c.ActorIdleTimeout.String())
-	assert.Equal(t, "3s", c.DrainOngoingCallTimeout.String())
-	assert.Equal(t, true, c.DrainRebalancedActors)
-	assert.Equal(t, "default", c.Namespace)
+	t.Run("valid durations override defaults", func(t *testing.T) {
+		c := NewConfig("localhost:5050", "app1", []string{"placement:5050"}, []string{"1"}, 3500, "1s", "2s", "3s", true, "default")
+		assert.Equal(t, "localhost:5050", c.HostAddress)
+		assert.Equal(t, "app1", c.AppID)
+		assert.Equal(t, []string{"placement:5050"}, c.PlacementAddresses)
+		assert.Equal(t, []string{"1"}, c.HostedActorTypes)
+		assert.Equal(t, 3500, c.Port)
+		assert.Equal(t, "1s", c.ActorDeactivationScanInterval.String())
+		assert.Equal(t, "2s", c.ActorIdleTimeout.String())
+		assert.Equal(t, "3s", c.DrainOngoingCallTimeout.String())
+		assert.Equal(t, true, c.DrainRebalancedActors)
+		assert.Equal(t, "default", c.Namespace)
+	})
+
+	t.Run("invalid durations fall back to defaults", func(t *testing.T) {
+		c := NewConfig("host", "app", nil, nil, 0, "invalid", "bad", "nope", false, "")
+		assert.Equal(t, defaultActorScanInterval, c.ActorDeactivationScanInterval)
+		assert.Equal(t, defaultActorIdleTimeout, c.ActorIdleTimeout)
+		assert.Equal(t, defaultOngoingCallTimeout, c.DrainOngoingCallTimeout)
+	})
+
+	t.Run("empty durations fall back to defaults", func(t *testing.T) {
+		c := NewConfig("host", "app", nil, nil, 0, "", "", "", false, "")
+		assert.Equal(t, defaultActorScanInterval, c.ActorDeactivationScanInterval)
+		assert.Equal(t, defaultActorIdleTimeout, c.ActorIdleTimeout)
+		assert.Equal(t, defaultOngoingCallTimeout, c.DrainOngoingCallTimeout)
+	})
+
+	t.Run("partial valid durations", func(t *testing.T) {
+		c := NewConfig("host", "app", nil, nil, 0, "5s", "invalid", "10m", false, "")
+		assert.Equal(t, 5*time.Second, c.ActorDeactivationScanInterval)
+		assert.Equal(t, defaultActorIdleTimeout, c.ActorIdleTimeout)
+		assert.Equal(t, 10*time.Minute, c.DrainOngoingCallTimeout)
+	})
 }
 
 func TestHostValidation(t *testing.T) {

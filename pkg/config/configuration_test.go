@@ -6,11 +6,31 @@
 package config
 
 import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"net"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/dapr/dapr/pkg/proto/common/v1"
+	operatorv1pb "github.com/dapr/dapr/pkg/proto/operator/v1"
+	"github.com/phayes/freeport"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const (
@@ -889,5 +909,288 @@ func TestGetOperationPrefixAndPostfix(t *testing.T) {
 		prefix, postfix := getOperationPrefixAndPostfix(operation)
 		assert.Equal(t, "/invoke", prefix)
 		assert.Equal(t, "/a/b/*", postfix)
+	})
+}
+
+// mockConfigOperator is a stub for the operator gRPC server used to test LoadKubernetesConfiguration
+type mockConfigOperator struct {
+	operatorv1pb.UnimplementedOperatorServer
+	configBytes []byte
+	err         error
+}
+
+func (m *mockConfigOperator) GetConfiguration(ctx context.Context, in *operatorv1pb.GetConfigurationRequest) (*operatorv1pb.GetConfigurationResponse, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &operatorv1pb.GetConfigurationResponse{
+		Configuration: m.configBytes,
+	}, nil
+}
+
+func (m *mockConfigOperator) ListComponents(ctx context.Context, in *emptypb.Empty) (*operatorv1pb.ListComponentResponse, error) {
+	return &operatorv1pb.ListComponentResponse{}, nil
+}
+
+func (m *mockConfigOperator) ListSubscriptions(ctx context.Context, in *emptypb.Empty) (*operatorv1pb.ListSubscriptionsResponse, error) {
+	return &operatorv1pb.ListSubscriptionsResponse{}, nil
+}
+
+func (m *mockConfigOperator) ComponentUpdate(in *emptypb.Empty, srv operatorv1pb.Operator_ComponentUpdateServer) error {
+	return nil
+}
+
+func startMockOperatorServer(t *testing.T, mock *mockConfigOperator) (operatorv1pb.OperatorClient, func()) {
+	t.Helper()
+	port, err := freeport.GetFreePort()
+	require.NoError(t, err)
+
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	require.NoError(t, err)
+
+	s := grpc.NewServer()
+	operatorv1pb.RegisterOperatorServer(s, mock)
+
+	go func() {
+		s.Serve(lis)
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+
+	conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", port), grpc.WithInsecure())
+	require.NoError(t, err)
+
+	client := operatorv1pb.NewOperatorClient(conn)
+	cleanup := func() {
+		conn.Close()
+		s.Stop()
+	}
+	return client, cleanup
+}
+
+func TestLoadKubernetesConfiguration(t *testing.T) {
+	t.Run("successfully loads configuration", func(t *testing.T) {
+		cfg := Configuration{
+			Spec: ConfigurationSpec{
+				TracingSpec: TracingSpec{
+					SamplingRate: "0.5",
+				},
+				MetricSpec: MetricSpec{
+					Enabled: true,
+				},
+			},
+		}
+		b, err := json.Marshal(cfg)
+		require.NoError(t, err)
+
+		mock := &mockConfigOperator{configBytes: b}
+		client, cleanup := startMockOperatorServer(t, mock)
+		defer cleanup()
+
+		result, err := LoadKubernetesConfiguration("myconfig", "default", client)
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Equal(t, "0.5", result.Spec.TracingSpec.SamplingRate)
+		assert.True(t, result.Spec.MetricSpec.Enabled)
+	})
+
+	t.Run("returns error when operator returns error", func(t *testing.T) {
+		mock := &mockConfigOperator{err: fmt.Errorf("connection refused")}
+		client, cleanup := startMockOperatorServer(t, mock)
+		defer cleanup()
+
+		_, err := LoadKubernetesConfiguration("myconfig", "default", client)
+		assert.Error(t, err)
+	})
+
+	t.Run("returns error when configuration is nil", func(t *testing.T) {
+		mock := &mockConfigOperator{configBytes: nil}
+		client, cleanup := startMockOperatorServer(t, mock)
+		defer cleanup()
+
+		_, err := LoadKubernetesConfiguration("myconfig", "default", client)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("returns error when configuration JSON is invalid", func(t *testing.T) {
+		mock := &mockConfigOperator{configBytes: []byte("not valid json {")}
+		client, cleanup := startMockOperatorServer(t, mock)
+		defer cleanup()
+
+		_, err := LoadKubernetesConfiguration("myconfig", "default", client)
+		assert.Error(t, err)
+	})
+
+	t.Run("returns error when secrets configuration is invalid", func(t *testing.T) {
+		cfg := Configuration{
+			Spec: ConfigurationSpec{
+				Secrets: SecretsSpec{
+					Scopes: []SecretsScope{
+						{
+							StoreName:     "store1",
+							DefaultAccess: AllowAccess,
+						},
+						{
+							StoreName:     "store1",
+							DefaultAccess: DenyAccess,
+						},
+					},
+				},
+			},
+		}
+		b, err := json.Marshal(cfg)
+		require.NoError(t, err)
+
+		mock := &mockConfigOperator{configBytes: b}
+		client, cleanup := startMockOperatorServer(t, mock)
+		defer cleanup()
+
+		_, err = LoadKubernetesConfiguration("myconfig", "default", client)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "storeName is repeated")
+	})
+}
+
+// createCertWithSAN creates a self-signed certificate with a SAN extension containing
+// the given URI as a uniformResourceIdentifier (tag 6).
+func createCertWithSAN(uri string) (*x509.Certificate, *ecdsa.PrivateKey) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	// Build the SAN extension manually with a URI value
+	// tag 6 = uniformResourceIdentifier
+	rawValue := asn1.RawValue{
+		Tag:   6,
+		Class: asn1.ClassContextSpecific,
+		Bytes: []byte(uri),
+	}
+	sanBytes, _ := asn1.Marshal(rawValue)
+	sanSeq, _ := asn1.Marshal(asn1.RawValue{
+		Tag:        asn1.TagSequence,
+		Class:      asn1.ClassUniversal,
+		IsCompound: true,
+		Bytes:      sanBytes,
+	})
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{
+				Id:    asn1.ObjectIdentifier{2, 5, 29, 17}, // SAN OID
+				Value: sanSeq,
+			},
+		},
+	}
+
+	certDER, _ := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	cert, _ := x509.ParseCertificate(certDER)
+	return cert, key
+}
+
+func TestGetSpiffeID(t *testing.T) {
+	t.Run("returns empty when no peer in context", func(t *testing.T) {
+		ctx := context.Background()
+		id, err := getSpiffeID(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "", id)
+	})
+
+	t.Run("returns error when peer has nil auth info", func(t *testing.T) {
+		ctx := peer.NewContext(context.Background(), &peer.Peer{
+			AuthInfo: nil,
+		})
+		_, err := getSpiffeID(ctx)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unable to retrieve peer auth info")
+	})
+
+	t.Run("extracts spiffe ID from TLS peer certificates", func(t *testing.T) {
+		spiffeURI := "spiffe://trustdomain/ns/mynamespace/myapp"
+		cert, _ := createCertWithSAN(spiffeURI)
+
+		tlsInfo := credentials.TLSInfo{
+			State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{cert},
+			},
+		}
+		ctx := peer.NewContext(context.Background(), &peer.Peer{
+			AuthInfo: tlsInfo,
+		})
+		id, err := getSpiffeID(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, spiffeURI, id)
+	})
+
+	t.Run("returns empty when cert has no spiffe URI", func(t *testing.T) {
+		cert, _ := createCertWithSAN("https://notaspiffe.example.com")
+
+		tlsInfo := credentials.TLSInfo{
+			State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{cert},
+			},
+		}
+		ctx := peer.NewContext(context.Background(), &peer.Peer{
+			AuthInfo: tlsInfo,
+		})
+		id, err := getSpiffeID(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "", id)
+	})
+
+	t.Run("returns empty when no peer certs", func(t *testing.T) {
+		tlsInfo := credentials.TLSInfo{
+			State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{},
+			},
+		}
+		ctx := peer.NewContext(context.Background(), &peer.Peer{
+			AuthInfo: tlsInfo,
+		})
+		id, err := getSpiffeID(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "", id)
+	})
+}
+
+func TestGetAndParseSpiffeID(t *testing.T) {
+	t.Run("returns error when no peer in context", func(t *testing.T) {
+		ctx := context.Background()
+		// getSpiffeID returns ("", nil) when no peer is present,
+		// then parseSpiffeID returns error for empty string
+		id, err := GetAndParseSpiffeID(ctx)
+		assert.Error(t, err)
+		assert.Nil(t, id)
+	})
+
+	t.Run("successfully parses spiffe ID from TLS context", func(t *testing.T) {
+		spiffeURI := "spiffe://trustdomain/ns/mynamespace/myapp"
+		cert, _ := createCertWithSAN(spiffeURI)
+
+		tlsInfo := credentials.TLSInfo{
+			State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{cert},
+			},
+		}
+		ctx := peer.NewContext(context.Background(), &peer.Peer{
+			AuthInfo: tlsInfo,
+		})
+		id, err := GetAndParseSpiffeID(ctx)
+		assert.NoError(t, err)
+		assert.NotNil(t, id)
+		assert.Equal(t, "trustdomain", id.TrustDomain)
+		assert.Equal(t, "mynamespace", id.Namespace)
+		assert.Equal(t, "myapp", id.AppID)
+	})
+
+	t.Run("returns error when peer auth info is nil", func(t *testing.T) {
+		ctx := peer.NewContext(context.Background(), &peer.Peer{
+			AuthInfo: nil,
+		})
+		id, err := GetAndParseSpiffeID(ctx)
+		assert.Error(t, err)
+		assert.Nil(t, id)
 	})
 }

@@ -13,3 +13,5 @@ github.com/
 **/.project
 **/.factorypath
 google
+*.out
+gaps*.txt

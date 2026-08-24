@@ -7,6 +7,7 @@ package raft
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/hashicorp/raft"
@@ -29,6 +30,69 @@ func (m *MockSnapShotSink) Cancel() error {
 
 func (m *MockSnapShotSink) Close() error {
 	return nil
+}
+
+// errorSnapShotSink is a mock sink that returns an error on Write.
+type errorSnapShotSink struct {
+	cancel bool
+}
+
+func (e *errorSnapShotSink) Write(p []byte) (int, error) {
+	return 0, errors.New("write error")
+}
+
+func (e *errorSnapShotSink) ID() string {
+	return "ErrorMock"
+}
+
+func (e *errorSnapShotSink) Cancel() error {
+	e.cancel = true
+	return nil
+}
+
+func (e *errorSnapShotSink) Close() error {
+	return nil
+}
+
+func TestRelease(t *testing.T) {
+	fsm := newFSM()
+	snap, err := fsm.Snapshot()
+	assert.NoError(t, err)
+
+	// Release is a no-op, just verify it doesn't panic
+	assert.NotPanics(t, func() {
+		snap.Release()
+	})
+}
+
+func TestPersistWriteError(t *testing.T) {
+	// arrange
+	fsm := newFSM()
+	testMember := DaprHostMember{
+		Name:     "127.0.0.1:3030",
+		AppID:    "fakeAppID",
+		Entities: []string{"actorTypeOne", "actorTypeTwo"},
+	}
+	cmdLog, _ := makeRaftLogCommand(MemberUpsert, testMember)
+	raftLog := &raft.Log{
+		Index: 1,
+		Term:  1,
+		Type:  raft.LogCommand,
+		Data:  cmdLog,
+	}
+	fsm.Apply(raftLog)
+
+	// act
+	snap, err := fsm.Snapshot()
+	assert.NoError(t, err)
+
+	errSink := &errorSnapShotSink{}
+	err = snap.Persist(errSink)
+
+	// assert
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "write error")
+	assert.True(t, errSink.cancel, "Cancel should be called when Write fails")
 }
 
 func TestPersist(t *testing.T) {

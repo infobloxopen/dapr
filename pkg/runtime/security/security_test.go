@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/dapr/dapr/pkg/credentials"
 	"github.com/dapr/dapr/pkg/sentry/certs"
 	"github.com/stretchr/testify/assert"
 )
@@ -76,4 +77,44 @@ func TestInitSidecarAuthenticator(t *testing.T) {
 	certChain, _ := GetCertChain()
 	_, err := GetSidecarAuthenticator("localhost:5050", certChain)
 	assert.NoError(t, err)
+}
+
+func TestGetCertChainErrors(t *testing.T) {
+	t.Run("missing trust anchors", func(t *testing.T) {
+		os.Unsetenv(certs.TrustAnchorsEnvVar)
+		os.Unsetenv(certs.CertChainEnvVar)
+		os.Unsetenv(certs.CertKeyEnvVar)
+
+		_, err := GetCertChain()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "trust anchors")
+	})
+
+	t.Run("missing cert chain", func(t *testing.T) {
+		os.Setenv(certs.TrustAnchorsEnvVar, "abc")
+		os.Unsetenv(certs.CertChainEnvVar)
+		os.Unsetenv(certs.CertKeyEnvVar)
+		defer os.Clearenv()
+
+		_, err := GetCertChain()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cert chain")
+	})
+}
+
+func TestGetSidecarAuthenticatorInvalidCert(t *testing.T) {
+	certChain := &credentials.CertChain{
+		RootCA: []byte("not-a-pem"),
+		Cert:   []byte("cert"),
+		Key:    []byte("key"),
+	}
+	_, err := GetSidecarAuthenticator("localhost:5050", certChain)
+	assert.Error(t, err)
+}
+
+func TestGetToken(t *testing.T) {
+	t.Run("returns empty for nonexistent file", func(t *testing.T) {
+		token := getToken()
+		assert.Empty(t, token)
+	})
 }

@@ -14,6 +14,8 @@ import (
 
 	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
 	"github.com/stretchr/testify/assert"
+	"go.opencensus.io/trace"
+	"go.opencensus.io/trace/propagation"
 	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -346,4 +348,492 @@ func TestProtobufToJSON(t *testing.T) {
 	// For mac and windows
 	comp2 := string(jsonBody) == "{\"stackEntries\":[\"first stack\", \"second stack\"]}"
 	assert.True(t, comp1 || comp2)
+}
+
+func TestHTTPStatusFromCode(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     codes.Code
+		expected int
+	}{
+		{"OK", codes.OK, 200},
+		{"Canceled", codes.Canceled, 408},
+		{"Unknown", codes.Unknown, 500},
+		{"InvalidArgument", codes.InvalidArgument, 400},
+		{"DeadlineExceeded", codes.DeadlineExceeded, 504},
+		{"NotFound", codes.NotFound, 404},
+		{"AlreadyExists", codes.AlreadyExists, 409},
+		{"PermissionDenied", codes.PermissionDenied, 403},
+		{"Unauthenticated", codes.Unauthenticated, 401},
+		{"ResourceExhausted", codes.ResourceExhausted, 429},
+		{"FailedPrecondition", codes.FailedPrecondition, 400},
+		{"Aborted", codes.Aborted, 409},
+		{"OutOfRange", codes.OutOfRange, 400},
+		{"Unimplemented", codes.Unimplemented, 501},
+		{"Internal", codes.Internal, 500},
+		{"Unavailable", codes.Unavailable, 503},
+		{"DataLoss", codes.DataLoss, 500},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, HTTPStatusFromCode(tt.code))
+		})
+	}
+}
+
+func TestCodeFromHTTPStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		expected codes.Code
+	}{
+		{"OK 200", 200, codes.OK},
+		{"Created 201", 201, codes.OK},
+		{"RequestTimeout", 408, codes.Canceled},
+		{"InternalServerError", 500, codes.Unknown},
+		{"BadRequest", 400, codes.Internal},
+		{"GatewayTimeout", 504, codes.DeadlineExceeded},
+		{"NotFound", 404, codes.NotFound},
+		{"Conflict", 409, codes.AlreadyExists},
+		{"Forbidden", 403, codes.PermissionDenied},
+		{"Unauthorized", 401, codes.Unauthenticated},
+		{"TooManyRequests", 429, codes.ResourceExhausted},
+		{"NotImplemented", 501, codes.Unimplemented},
+		{"ServiceUnavailable", 503, codes.Unavailable},
+		{"Unmapped status", 999, codes.Unknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, CodeFromHTTPStatus(tt.status))
+		})
+	}
+}
+
+func TestIsPermanentHTTPHeader(t *testing.T) {
+	tests := []struct {
+		header   string
+		expected bool
+	}{
+		{"Accept", true},
+		{"Content-Type", true},
+		{"Connection", true},
+		{"Keep-Alive", true},
+		{"Cookie", true},
+		{"Host", true},
+		{"X-Custom-Header", false},
+		{"Authorization", false},
+		{"User-Agent", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.header, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isPermanentHTTPHeader(tt.header))
+		})
+	}
+}
+
+func TestReservedGRPCMetadataToDaprPrefixHeader(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		expected string
+	}{
+		{"method", ":method", "dapr-method"},
+		{"scheme", ":scheme", "dapr-scheme"},
+		{"path", ":path", "dapr-path"},
+		{"authority", ":authority", "dapr-authority"},
+		{"grpc prefix", "grpc-timeout", "dapr-grpc-timeout"},
+		{"normal key", "custom-key", "custom-key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, reservedGRPCMetadataToDaprPrefixHeader(tt.key))
+		})
+	}
+}
+
+func TestIsGRPCProtocol(t *testing.T) {
+	t.Run("grpc content type", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			ContentTypeHeader: &internalv1pb.ListStringValue{Values: []string{GRPCContentType}},
+		}
+		assert.True(t, IsGRPCProtocol(md))
+	})
+
+	t.Run("json content type", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			ContentTypeHeader: &internalv1pb.ListStringValue{Values: []string{JSONContentType}},
+		}
+		assert.False(t, IsGRPCProtocol(md))
+	})
+
+	t.Run("empty metadata", func(t *testing.T) {
+		md := DaprInternalMetadata{}
+		assert.False(t, IsGRPCProtocol(md))
+	})
+}
+
+func TestProcessGRPCToHTTPTraceHeaders(t *testing.T) {
+	t.Run("valid base64 grpc-trace-bin value", func(t *testing.T) {
+		// Build a valid binary-encoded SpanContext using propagation.Binary
+		sc := trace.SpanContext{
+			TraceOptions: 1,
+		}
+		copy(sc.TraceID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
+		copy(sc.SpanID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8})
+		binSC := propagation.Binary(sc)
+		encodedTraceCtx := base64.StdEncoding.EncodeToString(binSC)
+
+		ctx := context.Background()
+		headers := map[string]string{}
+		processGRPCToHTTPTraceHeaders(ctx, encodedTraceCtx, func(k, v string) {
+			headers[k] = v
+		})
+
+		assert.NotEmpty(t, headers["traceparent"], "traceparent header should be set")
+	})
+
+	t.Run("invalid base64 grpc-trace-bin value falls back to context span", func(t *testing.T) {
+		ctx := context.Background()
+		headers := map[string]string{}
+		processGRPCToHTTPTraceHeaders(ctx, "not-valid-base64!!!", func(k, v string) {
+			headers[k] = v
+		})
+		// With a background context, SpanFromContext returns a no-op span with empty SpanContext.
+		// SpanContextToHTTPHeaders is a no-op for empty SpanContext, so no headers are set.
+		// The key point is this does not panic.
+	})
+
+	t.Run("empty grpc-trace-bin value falls back to context span", func(t *testing.T) {
+		ctx := context.Background()
+		headers := map[string]string{}
+		processGRPCToHTTPTraceHeaders(ctx, "", func(k, v string) {
+			headers[k] = v
+		})
+		// Should not panic with empty string
+	})
+
+	t.Run("base64 with invalid binary span context falls back to context span", func(t *testing.T) {
+		// Valid base64 but not a valid span context binary
+		encodedTraceCtx := base64.StdEncoding.EncodeToString([]byte("short"))
+		ctx := context.Background()
+		headers := map[string]string{}
+		processGRPCToHTTPTraceHeaders(ctx, encodedTraceCtx, func(k, v string) {
+			headers[k] = v
+		})
+		// Should not panic
+	})
+}
+
+func TestProcessHTTPToHTTPTraceHeaders(t *testing.T) {
+	t.Run("empty traceparent falls back to context span", func(t *testing.T) {
+		ctx := context.Background()
+		headers := map[string]string{}
+		processHTTPToHTTPTraceHeaders(ctx, "", "", func(k, v string) {
+			headers[k] = v
+		})
+		// With background context, SpanFromContext returns no-op span; no headers set for empty span context.
+	})
+
+	t.Run("non-empty traceparent without tracestate", func(t *testing.T) {
+		ctx := context.Background()
+		headers := map[string]string{}
+		tp := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+		processHTTPToHTTPTraceHeaders(ctx, tp, "", func(k, v string) {
+			headers[k] = v
+		})
+
+		assert.Equal(t, tp, headers["traceparent"])
+		_, hasTracestate := headers["tracestate"]
+		assert.False(t, hasTracestate, "tracestate should not be set when empty")
+	})
+
+	t.Run("non-empty traceparent with tracestate", func(t *testing.T) {
+		ctx := context.Background()
+		headers := map[string]string{}
+		tp := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+		ts := "vendor1=value1"
+		processHTTPToHTTPTraceHeaders(ctx, tp, ts, func(k, v string) {
+			headers[k] = v
+		})
+
+		assert.Equal(t, tp, headers["traceparent"])
+		assert.Equal(t, ts, headers["tracestate"])
+	})
+}
+
+func TestProcessGRPCToGRPCTraceHeader(t *testing.T) {
+	t.Run("empty grpc-trace-bin falls back to context span", func(t *testing.T) {
+		ctx := context.Background()
+		md := metadata.MD{}
+		processGRPCToGRPCTraceHeader(ctx, md, "")
+
+		vals := md.Get("grpc-trace-bin")
+		assert.Equal(t, 1, len(vals), "should set grpc-trace-bin from context span")
+	})
+
+	t.Run("valid base64 grpc-trace-bin value", func(t *testing.T) {
+		sc := trace.SpanContext{
+			TraceOptions: 1,
+		}
+		copy(sc.TraceID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
+		copy(sc.SpanID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8})
+		binSC := propagation.Binary(sc)
+		encodedValue := base64.StdEncoding.EncodeToString(binSC)
+
+		ctx := context.Background()
+		md := metadata.MD{}
+		processGRPCToGRPCTraceHeader(ctx, md, encodedValue)
+
+		vals := md.Get("grpc-trace-bin")
+		assert.Equal(t, 1, len(vals))
+		assert.Equal(t, string(binSC), vals[0])
+	})
+
+	t.Run("invalid base64 grpc-trace-bin value does not set header", func(t *testing.T) {
+		ctx := context.Background()
+		md := metadata.MD{}
+		processGRPCToGRPCTraceHeader(ctx, md, "not-valid-base64!!!")
+
+		vals := md.Get("grpc-trace-bin")
+		assert.Empty(t, vals, "invalid base64 should not set grpc-trace-bin")
+	})
+}
+
+func TestInternalMetadataToHTTPHeaderBinaryAndEdgeCases(t *testing.T) {
+	t.Run("binary headers are skipped", func(t *testing.T) {
+		fakeMetadata := DaprInternalMetadata{
+			"custom-header": {Values: []string{"value1"}},
+			"my-data-bin":   {Values: []string{"binaryvalue"}},
+		}
+
+		ctx := context.Background()
+		headers := map[string]string{}
+		InternalMetadataToHTTPHeader(ctx, fakeMetadata, func(k, v string) {
+			headers[k] = v
+		})
+
+		assert.Equal(t, "value1", headers["custom-header"])
+		_, hasBin := headers["my-data-bin"]
+		assert.False(t, hasBin, "binary headers should be skipped")
+	})
+
+	t.Run("empty values list is skipped", func(t *testing.T) {
+		fakeMetadata := DaprInternalMetadata{
+			"empty-header": {Values: []string{}},
+			"valid-header": {Values: []string{"valid"}},
+		}
+
+		ctx := context.Background()
+		headers := map[string]string{}
+		InternalMetadataToHTTPHeader(ctx, fakeMetadata, func(k, v string) {
+			headers[k] = v
+		})
+
+		_, hasEmpty := headers["empty-header"]
+		assert.False(t, hasEmpty, "headers with empty values should be skipped")
+		assert.Equal(t, "valid", headers["valid-header"])
+	})
+
+	t.Run("destination-app-id header is skipped", func(t *testing.T) {
+		fakeMetadata := DaprInternalMetadata{
+			DestinationIDHeader: {Values: []string{"myapp"}},
+			"custom-header":     {Values: []string{"value1"}},
+		}
+
+		ctx := context.Background()
+		headers := map[string]string{}
+		InternalMetadataToHTTPHeader(ctx, fakeMetadata, func(k, v string) {
+			headers[k] = v
+		})
+
+		_, hasDest := headers[DestinationIDHeader]
+		assert.False(t, hasDest, "destination-app-id should be skipped")
+		assert.Equal(t, "value1", headers["custom-header"])
+	})
+
+	t.Run("grpc protocol converts grpc-trace-bin to http trace headers", func(t *testing.T) {
+		sc := trace.SpanContext{
+			TraceOptions: 1,
+		}
+		copy(sc.TraceID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
+		copy(sc.SpanID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8})
+		binSC := propagation.Binary(sc)
+		encodedTraceCtx := base64.StdEncoding.EncodeToString(binSC)
+
+		fakeMetadata := DaprInternalMetadata{
+			"content-type":   {Values: []string{GRPCContentType}},
+			"grpc-trace-bin": {Values: []string{encodedTraceCtx}},
+			"custom-header":  {Values: []string{"value1"}},
+		}
+
+		ctx := context.Background()
+		headers := map[string]string{}
+		InternalMetadataToHTTPHeader(ctx, fakeMetadata, func(k, v string) {
+			headers[k] = v
+		})
+
+		assert.Equal(t, "value1", headers["custom-header"])
+		assert.NotEmpty(t, headers["traceparent"], "traceparent should be set from grpc-trace-bin")
+	})
+
+	t.Run("http protocol with traceparent and tracestate", func(t *testing.T) {
+		tp := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+		ts := "vendor1=value1"
+		fakeMetadata := DaprInternalMetadata{
+			"content-type":  {Values: []string{JSONContentType}},
+			"traceparent":   {Values: []string{tp}},
+			"tracestate":    {Values: []string{ts}},
+			"custom-header": {Values: []string{"value1"}},
+		}
+
+		ctx := context.Background()
+		headers := map[string]string{}
+		InternalMetadataToHTTPHeader(ctx, fakeMetadata, func(k, v string) {
+			headers[k] = v
+		})
+
+		assert.Equal(t, "value1", headers["custom-header"])
+		assert.Equal(t, tp, headers["traceparent"])
+		assert.Equal(t, ts, headers["tracestate"])
+	})
+
+	t.Run("http protocol with traceparent only", func(t *testing.T) {
+		tp := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+		fakeMetadata := DaprInternalMetadata{
+			"content-type":  {Values: []string{JSONContentType}},
+			"traceparent":   {Values: []string{tp}},
+			"custom-header": {Values: []string{"value1"}},
+		}
+
+		ctx := context.Background()
+		headers := map[string]string{}
+		InternalMetadataToHTTPHeader(ctx, fakeMetadata, func(k, v string) {
+			headers[k] = v
+		})
+
+		assert.Equal(t, tp, headers["traceparent"])
+		_, hasTracestate := headers["tracestate"]
+		assert.False(t, hasTracestate, "tracestate should not be set when not in metadata")
+	})
+}
+
+func TestInternalMetadataToGrpcMetadataEdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("destination-app-id header is skipped", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			DestinationIDHeader: {Values: []string{"myapp"}},
+			"custom-header":     {Values: []string{"value1"}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		_, hasDest := convertedMD[DestinationIDHeader]
+		assert.False(t, hasDest, "destination-app-id should be skipped")
+		assert.Equal(t, "value1", convertedMD["custom-header"][0])
+	})
+
+	t.Run("invalid base64 in binary metadata is skipped", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			"data-bin": {Values: []string{"not-valid-base64!!!"}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		_, hasBin := convertedMD["data-bin"]
+		assert.False(t, hasBin, "invalid base64 binary metadata should be skipped")
+	})
+
+	t.Run("valid base64 in binary metadata is decoded", func(t *testing.T) {
+		original := []byte{100, 200, 50}
+		encoded := base64.StdEncoding.EncodeToString(original)
+		md := DaprInternalMetadata{
+			"data-bin": {Values: []string{encoded}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		assert.Equal(t, string(original), convertedMD["data-bin"][0])
+	})
+
+	t.Run("grpc protocol with empty grpc-trace-bin falls back to context span", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			"content-type":   {Values: []string{GRPCContentType}},
+			"grpc-trace-bin": {Values: []string{""}},
+			"custom-header":  {Values: []string{"value1"}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		vals := convertedMD.Get("grpc-trace-bin")
+		assert.Equal(t, 1, len(vals), "grpc-trace-bin should be set from context span fallback")
+	})
+
+	t.Run("grpc protocol with valid grpc-trace-bin", func(t *testing.T) {
+		sc := trace.SpanContext{
+			TraceOptions: 1,
+		}
+		copy(sc.TraceID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
+		copy(sc.SpanID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8})
+		binSC := propagation.Binary(sc)
+		encodedTraceCtx := base64.StdEncoding.EncodeToString(binSC)
+
+		md := DaprInternalMetadata{
+			"content-type":   {Values: []string{GRPCContentType}},
+			"grpc-trace-bin": {Values: []string{encodedTraceCtx}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		vals := convertedMD.Get("grpc-trace-bin")
+		assert.Equal(t, 1, len(vals))
+		assert.Equal(t, string(binSC), vals[0])
+	})
+
+	t.Run("grpc protocol with invalid base64 grpc-trace-bin", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			"content-type":   {Values: []string{GRPCContentType}},
+			"grpc-trace-bin": {Values: []string{"not-valid-base64!!!"}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		// When base64 decode fails, grpc-trace-bin should not be set
+		vals := convertedMD.Get("grpc-trace-bin")
+		assert.Empty(t, vals, "invalid base64 should not set grpc-trace-bin")
+	})
+
+	t.Run("http protocol with traceparent converts to grpc-trace-bin", func(t *testing.T) {
+		tp := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+		ts := "vendor1=value1"
+		md := DaprInternalMetadata{
+			"content-type": {Values: []string{JSONContentType}},
+			"traceparent":  {Values: []string{tp}},
+			"tracestate":   {Values: []string{ts}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		vals := convertedMD.Get("grpc-trace-bin")
+		assert.Equal(t, 1, len(vals), "grpc-trace-bin should be set from HTTP traceparent")
+	})
+
+	t.Run("http protocol without traceparent falls back to context span", func(t *testing.T) {
+		md := DaprInternalMetadata{
+			"content-type":  {Values: []string{JSONContentType}},
+			"custom-header": {Values: []string{"value1"}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		vals := convertedMD.Get("grpc-trace-bin")
+		assert.Equal(t, 1, len(vals), "grpc-trace-bin should be set from context span fallback")
+	})
+
+	t.Run("multiple values in binary metadata decoded individually", func(t *testing.T) {
+		val1 := []byte{10, 20}
+		val2 := []byte{30, 40}
+		md := DaprInternalMetadata{
+			"payload-bin": {Values: []string{
+				base64.StdEncoding.EncodeToString(val1),
+				base64.StdEncoding.EncodeToString(val2),
+			}},
+		}
+
+		convertedMD := InternalMetadataToGrpcMetadata(ctx, md, false)
+		assert.Equal(t, string(val1), convertedMD["payload-bin"][0])
+		assert.Equal(t, string(val2), convertedMD["payload-bin"][1])
+	})
 }
