@@ -15,6 +15,7 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+
 func TestNewServer(t *testing.T) {
 	t.Run("constructor returns non-nil server", func(t *testing.T) {
 		apiObj := NewAPI(
@@ -126,5 +127,87 @@ func TestServerUseMetrics(t *testing.T) {
 		original := func(ctx *fasthttp.RequestCtx) {}
 		handler := srv.useMetrics(original)
 		require.NotNil(t, handler)
+	})
+}
+
+func TestServerUseRouter(t *testing.T) {
+	t.Run("returns a non-nil handler from API endpoints", func(t *testing.T) {
+		apiObj := NewAPI(
+			"router-test",
+			nil, nil, nil, nil, nil, nil, nil, nil, nil,
+			config.TracingSpec{},
+		)
+		srv := &server{
+			api:    apiObj,
+			config: ServerConfig{AppID: "router-test"},
+		}
+		handler := srv.useRouter()
+		require.NotNil(t, handler, "useRouter should return a non-nil handler")
+
+		// Exercise the router with a known route (healthz).
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.SetRequestURI("/v1.0/healthz")
+		ctx.Request.Header.SetMethod("GET")
+		handler(ctx)
+		// The handler should respond (either 200/204 or 500 depending on ready state).
+		assert.True(t, ctx.Response.StatusCode() > 0, "handler should set a status code")
+	})
+
+	t.Run("router handles unknown route with 404", func(t *testing.T) {
+		apiObj := NewAPI(
+			"router-test",
+			nil, nil, nil, nil, nil, nil, nil, nil, nil,
+			config.TracingSpec{},
+		)
+		srv := &server{
+			api:    apiObj,
+			config: ServerConfig{AppID: "router-test"},
+		}
+		handler := srv.useRouter()
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.SetRequestURI("/v1.0/nonexistent-route")
+		ctx.Request.Header.SetMethod("GET")
+		handler(ctx)
+		assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
+	})
+}
+
+func TestServerUseComponents(t *testing.T) {
+	t.Run("empty pipeline passes through to next handler", func(t *testing.T) {
+		srv := &server{
+			pipeline: http_middleware.Pipeline{},
+		}
+		called := false
+		next := func(ctx *fasthttp.RequestCtx) {
+			called = true
+		}
+		handler := srv.useComponents(next)
+		require.NotNil(t, handler)
+
+		ctx := &fasthttp.RequestCtx{}
+		handler(ctx)
+		assert.True(t, called, "empty pipeline should pass through to the next handler")
+	})
+
+	t.Run("pipeline with middleware wraps handler", func(t *testing.T) {
+		order := []string{}
+		middleware := func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+			return func(ctx *fasthttp.RequestCtx) {
+				order = append(order, "middleware")
+				next(ctx)
+			}
+		}
+		srv := &server{
+			pipeline: http_middleware.Pipeline{
+				Handlers: []http_middleware.Middleware{middleware},
+			},
+		}
+		next := func(ctx *fasthttp.RequestCtx) {
+			order = append(order, "handler")
+		}
+		handler := srv.useComponents(next)
+		ctx := &fasthttp.RequestCtx{}
+		handler(ctx)
+		assert.Equal(t, []string{"middleware", "handler"}, order)
 	})
 }

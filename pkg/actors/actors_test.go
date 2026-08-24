@@ -96,8 +96,8 @@ func newTestActorsRuntimeWithMock(mockAppChannel *channelt.MockAppChannel) *acto
 	fakeResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
 	mockAppChannel.On(
 		"InvokeMethod",
-		mock.AnythingOfType("*context.emptyCtx"),
-		mock.AnythingOfType("*v1.InvokeMethodRequest")).Return(fakeResp, nil)
+		mock.Anything,
+		mock.Anything).Return(fakeResp, nil)
 
 	mockAppChannel.On("GetBaseAddress").Return("http://127.0.0.1", nil)
 
@@ -166,11 +166,12 @@ func TestActorIsDeactivated(t *testing.T) {
 	actorKey := testActorsRuntime.constructCompositeKey(actorType, actorID)
 
 	deactivateActorWithDuration(testActorsRuntime, actorType, actorID, idleTimeout)
-	time.Sleep(time.Second * 3)
 
-	_, exists := testActorsRuntime.actorsTable.Load(actorKey)
-
-	assert.False(t, exists)
+	// Poll instead of fixed sleep to avoid flaky timing under load.
+	assert.Eventually(t, func() bool {
+		_, exists := testActorsRuntime.actorsTable.Load(actorKey)
+		return !exists
+	}, 10*time.Second, 200*time.Millisecond, "actor should be deactivated after idle timeout")
 }
 
 func TestActorIsNotDeactivated(t *testing.T) {

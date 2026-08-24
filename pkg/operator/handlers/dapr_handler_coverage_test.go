@@ -74,6 +74,35 @@ func (c *errOnCreateClient) Create(ctx context.Context, obj client.Object, opts 
 	return fmt.Errorf("simulated create error")
 }
 
+// errOnGetClient wraps a real client.Client and forces Get to fail with a
+// non-NotFound error.
+type errOnGetClient struct {
+	client.Client
+}
+
+func (c *errOnGetClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+	return fmt.Errorf("simulated get error")
+}
+
+// errOnListClient wraps a real client.Client and forces List to fail.
+type errOnListClient struct {
+	client.Client
+}
+
+func (c *errOnListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	return fmt.Errorf("simulated list error")
+}
+
+// errOnDeleteClient wraps a real client.Client and forces Delete to fail with a
+// non-NotFound error.
+type errOnDeleteClient struct {
+	client.Client
+}
+
+func (c *errOnDeleteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	return fmt.Errorf("simulated delete error")
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -246,4 +275,133 @@ func TestReconcile(t *testing.T) {
 		assert.NoError(t, err)
 		assert.False(t, result.Requeue)
 	})
+
+	t.Run("non-NotFound Get error is propagated", func(t *testing.T) {
+		s := newTestScheme(t)
+		real := fake_client.NewClientBuilder().WithScheme(s).Build()
+		c := &errOnGetClient{Client: real}
+		h := newDaprHandlerWithClient(c, s)
+
+		req := ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "default",
+				Name:      "app",
+			},
+		}
+
+		result, err := h.Reconcile(context.TODO(), req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "simulated get error")
+		assert.False(t, result.Requeue)
+	})
+
+	t.Run("deployment being deleted is a no-op", func(t *testing.T) {
+		s := newTestScheme(t)
+		dep := getDeploymentWithSelector("myapp", "true", "default")
+		now := meta_v1.Now()
+		dep.DeletionTimestamp = &now
+
+		c := fake_client.NewClientBuilder().WithScheme(s).WithObjects(dep).Build()
+		h := newDaprHandlerWithClient(c, s)
+
+		req := ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "default",
+				Name:      "app",
+			},
+		}
+
+		result, err := h.Reconcile(context.TODO(), req)
+		assert.NoError(t, err)
+		assert.False(t, result.Requeue)
+
+		// No service should have been created.
+		var svc corev1.Service
+		getErr := c.Get(context.TODO(), types.NamespacedName{
+			Namespace: "default", Name: "myapp-dapr",
+		}, &svc)
+		assert.Error(t, getErr, "no service should be created for a deleting deployment")
+	})
+}
+
+func TestEnsureDaprServicePresent_AlreadyExists(t *testing.T) {
+	s := newTestScheme(t)
+	dep := getDeploymentWithSelector("myapp", "true", "default")
+
+	// Pre-create the service that ensureDaprServicePresent would create.
+	existingSvc := &corev1.Service{
+		ObjectMeta: meta_v1.ObjectMeta{
+			Name:      "myapp-dapr",
+			Namespace: "default",
+		},
+	}
+
+	c := fake_client.NewClientBuilder().WithScheme(s).WithObjects(existingSvc).Build()
+	h := newDaprHandlerWithClient(c, s)
+
+	err := h.ensureDaprServicePresent(context.TODO(), "default", dep)
+	assert.NoError(t, err)
+
+	// Verify the existing service is still there and was not recreated
+	// (i.e. no extra ports were added by createDaprService).
+	var svc corev1.Service
+	require.NoError(t, c.Get(context.TODO(), types.NamespacedName{
+		Namespace: "default", Name: "myapp-dapr",
+	}, &svc))
+	assert.Empty(t, svc.Spec.Ports, "pre-existing service should not have been mutated")
+}
+
+func TestEnsureDaprServicePresent_GetError(t *testing.T) {
+	s := newTestScheme(t)
+	real := fake_client.NewClientBuilder().WithScheme(s).Build()
+	c := &errOnGetClient{Client: real}
+	h := newDaprHandlerWithClient(c, s)
+
+	dep := getDeploymentWithSelector("myapp", "true", "default")
+
+	err := h.ensureDaprServicePresent(context.TODO(), "default", dep)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated get error")
+}
+
+func TestEnsureDaprServiceAbsent_ListError(t *testing.T) {
+	s := newTestScheme(t)
+	real := fake_client.NewClientBuilder().WithScheme(s).Build()
+	c := &errOnListClient{Client: real}
+	h := newDaprHandlerWithClient(c, s)
+
+	key := types.NamespacedName{Namespace: "default", Name: "app"}
+	err := h.ensureDaprServiceAbsent(context.TODO(), key)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated list error")
+}
+
+func TestEnsureDaprServiceAbsent_DeleteError(t *testing.T) {
+	s := newTestScheme(t)
+
+	existingSvc := &corev1.Service{
+		ObjectMeta: meta_v1.ObjectMeta{
+			Name:      "myapp-dapr",
+			Namespace: "default",
+			Annotations: map[string]string{
+				appIDAnnotationKey: "myapp",
+			},
+		},
+	}
+
+	real := fake_client.NewClientBuilder().WithScheme(s).WithObjects(existingSvc).Build()
+	c := &errOnDeleteClient{Client: real}
+	h := newDaprHandlerWithClient(c, s)
+
+	key := types.NamespacedName{Namespace: "default", Name: "app"}
+	err := h.ensureDaprServiceAbsent(context.TODO(), key)
+	// The function logs the delete error but does not return it.
+	assert.NoError(t, err)
+
+	// The service should still exist because Delete was intercepted.
+	var svc corev1.Service
+	getErr := real.Get(context.TODO(), types.NamespacedName{
+		Namespace: "default", Name: "myapp-dapr",
+	}, &svc)
+	assert.NoError(t, getErr, "service should still exist because delete failed")
 }

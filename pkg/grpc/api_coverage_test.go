@@ -11,15 +11,23 @@ import (
 	"testing"
 
 	"github.com/dapr/components-contrib/pubsub"
+	"github.com/dapr/components-contrib/secretstores"
 	"github.com/dapr/components-contrib/state"
+	"github.com/dapr/dapr/pkg/actors"
 	components_v1alpha "github.com/dapr/dapr/pkg/apis/components/v1alpha1"
+	"github.com/dapr/dapr/pkg/channel"
 	"github.com/dapr/dapr/pkg/config"
+	"github.com/dapr/dapr/pkg/messaging"
+	invokev1 "github.com/dapr/dapr/pkg/messaging/v1"
 	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
+	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
 	runtimev1pb "github.com/dapr/dapr/pkg/proto/runtime/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opencensus.io/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // --- hand-written stubs ---
@@ -99,6 +107,129 @@ func (s *stubStateStore) BulkSet(req []state.SetRequest) error {
 		return s.bulkSetFn(req)
 	}
 	return nil
+}
+
+// stubActors implements actors.Actors with configurable behaviour.
+type stubActors struct {
+	callFn                        func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error)
+	initFn                        func() error
+	getStateFn                    func(ctx context.Context, req *actors.GetStateRequest) (*actors.StateResponse, error)
+	transactionalStateOperationFn func(ctx context.Context, req *actors.TransactionalRequest) error
+	getReminderFn                 func(ctx context.Context, req *actors.GetReminderRequest) (*actors.Reminder, error)
+	createReminderFn              func(ctx context.Context, req *actors.CreateReminderRequest) error
+	deleteReminderFn              func(ctx context.Context, req *actors.DeleteReminderRequest) error
+	createTimerFn                 func(ctx context.Context, req *actors.CreateTimerRequest) error
+	deleteTimerFn                 func(ctx context.Context, req *actors.DeleteTimerRequest) error
+	isActorHostedFn               func(ctx context.Context, req *actors.ActorHostedRequest) bool
+	getActiveActorsCountFn        func(ctx context.Context) []actors.ActiveActorsCount
+}
+
+func (s *stubActors) Call(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+	if s.callFn != nil {
+		return s.callFn(ctx, req)
+	}
+	return invokev1.NewInvokeMethodResponse(200, "OK", nil), nil
+}
+
+func (s *stubActors) Init() error {
+	if s.initFn != nil {
+		return s.initFn()
+	}
+	return nil
+}
+
+func (s *stubActors) Stop() {}
+
+func (s *stubActors) GetState(ctx context.Context, req *actors.GetStateRequest) (*actors.StateResponse, error) {
+	if s.getStateFn != nil {
+		return s.getStateFn(ctx, req)
+	}
+	return &actors.StateResponse{}, nil
+}
+
+func (s *stubActors) TransactionalStateOperation(ctx context.Context, req *actors.TransactionalRequest) error {
+	if s.transactionalStateOperationFn != nil {
+		return s.transactionalStateOperationFn(ctx, req)
+	}
+	return nil
+}
+
+func (s *stubActors) GetReminder(ctx context.Context, req *actors.GetReminderRequest) (*actors.Reminder, error) {
+	if s.getReminderFn != nil {
+		return s.getReminderFn(ctx, req)
+	}
+	return &actors.Reminder{}, nil
+}
+
+func (s *stubActors) CreateReminder(ctx context.Context, req *actors.CreateReminderRequest) error {
+	if s.createReminderFn != nil {
+		return s.createReminderFn(ctx, req)
+	}
+	return nil
+}
+
+func (s *stubActors) DeleteReminder(ctx context.Context, req *actors.DeleteReminderRequest) error {
+	if s.deleteReminderFn != nil {
+		return s.deleteReminderFn(ctx, req)
+	}
+	return nil
+}
+
+func (s *stubActors) CreateTimer(ctx context.Context, req *actors.CreateTimerRequest) error {
+	if s.createTimerFn != nil {
+		return s.createTimerFn(ctx, req)
+	}
+	return nil
+}
+
+func (s *stubActors) DeleteTimer(ctx context.Context, req *actors.DeleteTimerRequest) error {
+	if s.deleteTimerFn != nil {
+		return s.deleteTimerFn(ctx, req)
+	}
+	return nil
+}
+
+func (s *stubActors) IsActorHosted(ctx context.Context, req *actors.ActorHostedRequest) bool {
+	if s.isActorHostedFn != nil {
+		return s.isActorHostedFn(ctx, req)
+	}
+	return true
+}
+
+func (s *stubActors) GetActiveActorsCount(ctx context.Context) []actors.ActiveActorsCount {
+	if s.getActiveActorsCountFn != nil {
+		return s.getActiveActorsCountFn(ctx)
+	}
+	return nil
+}
+
+// stubSecretStore implements secretstores.SecretStore with configurable behaviour.
+type stubSecretStore struct {
+	getSecretFn     func(secretstores.GetSecretRequest) (secretstores.GetSecretResponse, error)
+	bulkGetSecretFn func(secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error)
+}
+
+func (s *stubSecretStore) Init(secretstores.Metadata) error { return nil }
+
+func (s *stubSecretStore) GetSecret(req secretstores.GetSecretRequest) (secretstores.GetSecretResponse, error) {
+	if s.getSecretFn != nil {
+		return s.getSecretFn(req)
+	}
+	return secretstores.GetSecretResponse{}, nil
+}
+
+func (s *stubSecretStore) BulkGetSecret(req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
+	if s.bulkGetSecretFn != nil {
+		return s.bulkGetSecretFn(req)
+	}
+	return secretstores.BulkGetSecretResponse{}, nil
+}
+
+// ctxWithSpan returns a context with an opencensus span attached, so that
+// diag_utils.SpanFromContext does not return nil.
+func ctxWithSpan() context.Context {
+	ctx, _ := trace.StartSpan(context.Background(), "test")
+	return ctx
 }
 
 // --- tests ---
@@ -409,5 +540,776 @@ func TestApplyAccessControlPolicies(t *testing.T) {
 
 		assert.True(t, allowed)
 		assert.Empty(t, errMsg)
+	})
+}
+
+// --- setter tests ---
+
+func TestSetAppChannelCoverage(t *testing.T) {
+	t.Run("sets app channel to non-nil value", func(t *testing.T) {
+		a := &api{}
+		assert.Nil(t, a.appChannel)
+
+		var fakeChannel channel.AppChannel // nil interface value is fine for setter test
+		a.SetAppChannel(fakeChannel)
+		// The setter simply assigns the field; verify the assignment happened.
+		assert.Equal(t, fakeChannel, a.appChannel)
+	})
+}
+
+func TestSetDirectMessagingCoverage(t *testing.T) {
+	t.Run("sets direct messaging to non-nil value", func(t *testing.T) {
+		a := &api{}
+		assert.Nil(t, a.directMessaging)
+
+		var fakeDM messaging.DirectMessaging
+		a.SetDirectMessaging(fakeDM)
+		assert.Equal(t, fakeDM, a.directMessaging)
+	})
+}
+
+func TestSetActorRuntimeCoverage(t *testing.T) {
+	t.Run("sets actor runtime", func(t *testing.T) {
+		a := &api{}
+		assert.Nil(t, a.actor)
+
+		stub := &stubActors{}
+		a.SetActorRuntime(stub)
+		assert.Equal(t, stub, a.actor)
+	})
+}
+
+// --- CallActor tests ---
+
+func TestCallActorCoverage(t *testing.T) {
+	t.Run("invalid request returns InvalidArgument", func(t *testing.T) {
+		a := &api{actor: &stubActors{}}
+
+		// InternalInvokeRequest with nil Message triggers an error from
+		// invokev1.InternalInvokeRequest.
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: nil,
+		}
+		_, err := a.CallActor(context.Background(), in)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+
+	t.Run("actor Call returns error", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				callFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					return nil, errors.New("actor call failed")
+				},
+			},
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{Method: "mymethod"},
+		}
+		_, err := a.CallActor(context.Background(), in)
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("actor Call succeeds", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				callFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					return invokev1.NewInvokeMethodResponse(200, "OK", nil), nil
+				},
+			},
+		}
+
+		in := &internalv1pb.InternalInvokeRequest{
+			Message: &commonv1pb.InvokeRequest{Method: "mymethod"},
+		}
+		resp, err := a.CallActor(context.Background(), in)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+	})
+}
+
+// --- InvokeActor tests ---
+
+func TestInvokeActorCoverage(t *testing.T) {
+	t.Run("actor runtime nil returns error", func(t *testing.T) {
+		a := &api{actor: nil}
+
+		_, err := a.InvokeActor(context.Background(), &runtimev1pb.InvokeActorRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Method:    "DoWork",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("actor Call returns error", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				callFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					return nil, errors.New("invoke failed")
+				},
+			},
+		}
+
+		_, err := a.InvokeActor(context.Background(), &runtimev1pb.InvokeActorRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Method:    "DoWork",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("success path returns data", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				callFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+					resp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
+					resp.WithRawData([]byte(`{"result":"ok"}`), "application/json")
+					return resp, nil
+				},
+			},
+		}
+
+		resp, err := a.InvokeActor(context.Background(), &runtimev1pb.InvokeActorRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Method:    "DoWork",
+			Data:      []byte(`{"input":"test"}`),
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []byte(`{"result":"ok"}`), resp.Data)
+	})
+}
+
+// --- RegisterActorTimer tests ---
+
+func TestRegisterActorTimerCoverage(t *testing.T) {
+	t.Run("actor runtime nil returns error", func(t *testing.T) {
+		a := &api{actor: nil}
+
+		_, err := a.RegisterActorTimer(context.Background(), &runtimev1pb.RegisterActorTimerRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "timer1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("success with data", func(t *testing.T) {
+		var captured *actors.CreateTimerRequest
+		a := &api{
+			actor: &stubActors{
+				createTimerFn: func(ctx context.Context, req *actors.CreateTimerRequest) error {
+					captured = req
+					return nil
+				},
+			},
+		}
+
+		_, err := a.RegisterActorTimer(context.Background(), &runtimev1pb.RegisterActorTimerRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "timer1",
+			DueTime:   "0h0m3s0ms",
+			Period:    "0h0m7s0ms",
+			Callback:  "myCallback",
+			Data:      []byte(`{"key":"val"}`),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, captured)
+		assert.Equal(t, "timer1", captured.Name)
+		assert.Equal(t, "mytype", captured.ActorType)
+		assert.Equal(t, "123", captured.ActorID)
+		assert.Equal(t, "myCallback", captured.Callback)
+		assert.Equal(t, []byte(`{"key":"val"}`), captured.Data)
+	})
+
+	t.Run("success without data", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				createTimerFn: func(ctx context.Context, req *actors.CreateTimerRequest) error {
+					return nil
+				},
+			},
+		}
+
+		_, err := a.RegisterActorTimer(context.Background(), &runtimev1pb.RegisterActorTimerRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "timer1",
+		})
+		require.NoError(t, err)
+	})
+}
+
+// --- UnregisterActorTimer tests ---
+
+func TestUnregisterActorTimerCoverage(t *testing.T) {
+	t.Run("actor runtime nil returns error", func(t *testing.T) {
+		a := &api{actor: nil}
+
+		_, err := a.UnregisterActorTimer(context.Background(), &runtimev1pb.UnregisterActorTimerRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "timer1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("success", func(t *testing.T) {
+		var captured *actors.DeleteTimerRequest
+		a := &api{
+			actor: &stubActors{
+				deleteTimerFn: func(ctx context.Context, req *actors.DeleteTimerRequest) error {
+					captured = req
+					return nil
+				},
+			},
+		}
+
+		_, err := a.UnregisterActorTimer(context.Background(), &runtimev1pb.UnregisterActorTimerRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "timer1",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, captured)
+		assert.Equal(t, "timer1", captured.Name)
+		assert.Equal(t, "mytype", captured.ActorType)
+		assert.Equal(t, "123", captured.ActorID)
+	})
+}
+
+// --- RegisterActorReminder tests ---
+
+func TestRegisterActorReminderCoverage(t *testing.T) {
+	t.Run("actor runtime nil returns error", func(t *testing.T) {
+		a := &api{actor: nil}
+
+		_, err := a.RegisterActorReminder(context.Background(), &runtimev1pb.RegisterActorReminderRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "reminder1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("success with data", func(t *testing.T) {
+		var captured *actors.CreateReminderRequest
+		a := &api{
+			actor: &stubActors{
+				createReminderFn: func(ctx context.Context, req *actors.CreateReminderRequest) error {
+					captured = req
+					return nil
+				},
+			},
+		}
+
+		_, err := a.RegisterActorReminder(context.Background(), &runtimev1pb.RegisterActorReminderRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "reminder1",
+			DueTime:   "0h0m5s0ms",
+			Period:    "0h0m10s0ms",
+			Data:      []byte(`{"key":"val"}`),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, captured)
+		assert.Equal(t, "reminder1", captured.Name)
+		assert.Equal(t, "mytype", captured.ActorType)
+		assert.Equal(t, "123", captured.ActorID)
+		assert.Equal(t, []byte(`{"key":"val"}`), captured.Data)
+	})
+
+	t.Run("success without data", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				createReminderFn: func(ctx context.Context, req *actors.CreateReminderRequest) error {
+					return nil
+				},
+			},
+		}
+
+		_, err := a.RegisterActorReminder(context.Background(), &runtimev1pb.RegisterActorReminderRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "reminder1",
+		})
+		require.NoError(t, err)
+	})
+}
+
+// --- UnregisterActorReminder tests ---
+
+func TestUnregisterActorReminderCoverage(t *testing.T) {
+	t.Run("actor runtime nil returns error", func(t *testing.T) {
+		a := &api{actor: nil}
+
+		_, err := a.UnregisterActorReminder(context.Background(), &runtimev1pb.UnregisterActorReminderRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "reminder1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("success", func(t *testing.T) {
+		var captured *actors.DeleteReminderRequest
+		a := &api{
+			actor: &stubActors{
+				deleteReminderFn: func(ctx context.Context, req *actors.DeleteReminderRequest) error {
+					captured = req
+					return nil
+				},
+			},
+		}
+
+		_, err := a.UnregisterActorReminder(context.Background(), &runtimev1pb.UnregisterActorReminderRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Name:      "reminder1",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, captured)
+		assert.Equal(t, "reminder1", captured.Name)
+		assert.Equal(t, "mytype", captured.ActorType)
+		assert.Equal(t, "123", captured.ActorID)
+	})
+}
+
+// --- GetActorState tests ---
+
+func TestGetActorStateCoverage(t *testing.T) {
+	t.Run("actor runtime nil returns error", func(t *testing.T) {
+		a := &api{actor: nil}
+
+		_, err := a.GetActorState(context.Background(), &runtimev1pb.GetActorStateRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Key:       "mykey",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("actor not hosted returns error", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				isActorHostedFn: func(ctx context.Context, req *actors.ActorHostedRequest) bool {
+					return false
+				},
+			},
+		}
+
+		_, err := a.GetActorState(context.Background(), &runtimev1pb.GetActorStateRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Key:       "mykey",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("GetState returns error", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				isActorHostedFn: func(ctx context.Context, req *actors.ActorHostedRequest) bool {
+					return true
+				},
+				getStateFn: func(ctx context.Context, req *actors.GetStateRequest) (*actors.StateResponse, error) {
+					return nil, errors.New("state error")
+				},
+			},
+		}
+
+		_, err := a.GetActorState(context.Background(), &runtimev1pb.GetActorStateRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Key:       "mykey",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("success", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				isActorHostedFn: func(ctx context.Context, req *actors.ActorHostedRequest) bool {
+					assert.Equal(t, "mytype", req.ActorType)
+					assert.Equal(t, "123", req.ActorID)
+					return true
+				},
+				getStateFn: func(ctx context.Context, req *actors.GetStateRequest) (*actors.StateResponse, error) {
+					assert.Equal(t, "mykey", req.Key)
+					return &actors.StateResponse{Data: []byte(`{"val":"data"}`)}, nil
+				},
+			},
+		}
+
+		resp, err := a.GetActorState(context.Background(), &runtimev1pb.GetActorStateRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Key:       "mykey",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []byte(`{"val":"data"}`), resp.Data)
+	})
+}
+
+// --- ExecuteActorStateTransaction tests ---
+
+func TestExecuteActorStateTransactionCoverage(t *testing.T) {
+	t.Run("actor runtime nil returns error", func(t *testing.T) {
+		a := &api{actor: nil}
+
+		_, err := a.ExecuteActorStateTransaction(context.Background(), &runtimev1pb.ExecuteActorStateTransactionRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("actor not hosted returns error", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				isActorHostedFn: func(ctx context.Context, req *actors.ActorHostedRequest) bool {
+					return false
+				},
+			},
+		}
+
+		_, err := a.ExecuteActorStateTransaction(context.Background(), &runtimev1pb.ExecuteActorStateTransactionRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("unsupported operation returns error", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				isActorHostedFn: func(ctx context.Context, req *actors.ActorHostedRequest) bool {
+					return true
+				},
+			},
+		}
+
+		_, err := a.ExecuteActorStateTransaction(context.Background(), &runtimev1pb.ExecuteActorStateTransactionRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Operations: []*runtimev1pb.TransactionalActorStateOperation{
+				{
+					OperationType: "unsupported",
+					Key:           "key1",
+					Value:         &anypb.Any{Value: []byte("val")},
+				},
+			},
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Unimplemented, status.Code(err))
+	})
+
+	t.Run("TransactionalStateOperation returns error", func(t *testing.T) {
+		a := &api{
+			actor: &stubActors{
+				isActorHostedFn: func(ctx context.Context, req *actors.ActorHostedRequest) bool {
+					return true
+				},
+				transactionalStateOperationFn: func(ctx context.Context, req *actors.TransactionalRequest) error {
+					return errors.New("txn failed")
+				},
+			},
+		}
+
+		_, err := a.ExecuteActorStateTransaction(context.Background(), &runtimev1pb.ExecuteActorStateTransactionRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Operations: []*runtimev1pb.TransactionalActorStateOperation{
+				{
+					OperationType: "upsert",
+					Key:           "key1",
+					Value:         &anypb.Any{Value: []byte("val")},
+				},
+			},
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("success with upsert and delete", func(t *testing.T) {
+		var captured *actors.TransactionalRequest
+		a := &api{
+			actor: &stubActors{
+				isActorHostedFn: func(ctx context.Context, req *actors.ActorHostedRequest) bool {
+					return true
+				},
+				transactionalStateOperationFn: func(ctx context.Context, req *actors.TransactionalRequest) error {
+					captured = req
+					return nil
+				},
+			},
+		}
+
+		_, err := a.ExecuteActorStateTransaction(context.Background(), &runtimev1pb.ExecuteActorStateTransactionRequest{
+			ActorType: "mytype",
+			ActorId:   "123",
+			Operations: []*runtimev1pb.TransactionalActorStateOperation{
+				{
+					OperationType: "upsert",
+					Key:           "key1",
+					Value:         &anypb.Any{Value: []byte("val1")},
+				},
+				{
+					OperationType: "delete",
+					Key:           "key2",
+					Value:         &anypb.Any{Value: []byte("val2")},
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, captured)
+		assert.Equal(t, "mytype", captured.ActorType)
+		assert.Equal(t, "123", captured.ActorID)
+		assert.Len(t, captured.Operations, 2)
+	})
+}
+
+// --- GetBulkSecret tests ---
+
+func TestGetBulkSecretCoverage(t *testing.T) {
+	t.Run("secret store not configured", func(t *testing.T) {
+		a := &api{
+			id:           "test-app",
+			secretStores: nil,
+		}
+
+		_, err := a.GetBulkSecret(context.Background(), &runtimev1pb.GetBulkSecretRequest{
+			StoreName: "mystore",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+	})
+
+	t.Run("secret store not found", func(t *testing.T) {
+		a := &api{
+			id:           "test-app",
+			secretStores: map[string]secretstores.SecretStore{"store1": &stubSecretStore{}},
+		}
+
+		_, err := a.GetBulkSecret(context.Background(), &runtimev1pb.GetBulkSecretRequest{
+			StoreName: "nonexistent",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+
+	t.Run("BulkGetSecret returns error", func(t *testing.T) {
+		store := &stubSecretStore{
+			bulkGetSecretFn: func(req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
+				return secretstores.BulkGetSecretResponse{}, errors.New("bulk get failed")
+			},
+		}
+		a := &api{
+			id:           "test-app",
+			secretStores: map[string]secretstores.SecretStore{"mystore": store},
+		}
+
+		_, err := a.GetBulkSecret(context.Background(), &runtimev1pb.GetBulkSecretRequest{
+			StoreName: "mystore",
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("success with all secrets allowed", func(t *testing.T) {
+		store := &stubSecretStore{
+			bulkGetSecretFn: func(req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
+				return secretstores.BulkGetSecretResponse{
+					Data: map[string]map[string]string{
+						"secret1": {"key1": "val1"},
+						"secret2": {"key2": "val2"},
+					},
+				}, nil
+			},
+		}
+		a := &api{
+			id:                   "test-app",
+			secretStores:         map[string]secretstores.SecretStore{"mystore": store},
+			secretsConfiguration: map[string]config.SecretsScope{},
+		}
+
+		resp, err := a.GetBulkSecret(context.Background(), &runtimev1pb.GetBulkSecretRequest{
+			StoreName: "mystore",
+		})
+		require.NoError(t, err)
+		assert.Len(t, resp.Data, 2)
+		assert.Equal(t, "val1", resp.Data["secret1"].Secrets["key1"])
+		assert.Equal(t, "val2", resp.Data["secret2"].Secrets["key2"])
+	})
+
+	t.Run("secret not allowed is filtered out", func(t *testing.T) {
+		store := &stubSecretStore{
+			bulkGetSecretFn: func(req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
+				return secretstores.BulkGetSecretResponse{
+					Data: map[string]map[string]string{
+						"allowed-secret":    {"k": "v"},
+						"disallowed-secret": {"k": "v"},
+					},
+				}, nil
+			},
+		}
+		a := &api{
+			id:           "test-app",
+			secretStores: map[string]secretstores.SecretStore{"mystore": store},
+			secretsConfiguration: map[string]config.SecretsScope{
+				"mystore": {
+					StoreName:      "mystore",
+					DefaultAccess:  "deny",
+					AllowedSecrets: []string{"allowed-secret"},
+				},
+			},
+		}
+
+		resp, err := a.GetBulkSecret(context.Background(), &runtimev1pb.GetBulkSecretRequest{
+			StoreName: "mystore",
+		})
+		require.NoError(t, err)
+		// Only allowed-secret should remain.
+		assert.Len(t, resp.Data, 1)
+		assert.Contains(t, resp.Data, "allowed-secret")
+	})
+}
+
+// --- PublishEvent success path tests ---
+
+func TestPublishEventCoverageMore(t *testing.T) {
+	// The success path of PublishEvent marshals the cloud event envelope via
+	// jsoniter.ConfigFastest.Marshal, which panics on Go 1.26 due to
+	// json-iterator/reflect2 v1.0.1 incompatibility with SwissTable maps.
+	// These subtests are skipped until that dependency is upgraded.
+
+	t.Run("success with data", func(t *testing.T) {
+		t.Skip("json-iterator/reflect2 v1.0.1 panics on Go 1.26 SwissTable maps during cloud event marshaling")
+
+		var captured *pubsub.PublishRequest
+		ps := &stubPubSub{
+			features: []pubsub.Feature{},
+		}
+
+		a := &api{
+			id: "test-app",
+			pubsubAdapter: &stubPubSubAdapter{
+				getPubSubFn: func(name string) pubsub.PubSub { return ps },
+				publishFn: func(req *pubsub.PublishRequest) error {
+					captured = req
+					return nil
+				},
+			},
+		}
+
+		resp, err := a.PublishEvent(ctxWithSpan(), &runtimev1pb.PublishEventRequest{
+			PubsubName:      "mypubsub",
+			Topic:           "mytopic",
+			Data:            []byte("hello world"),
+			DataContentType: "text/plain",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.NotNil(t, captured)
+		assert.Equal(t, "mypubsub", captured.PubsubName)
+		assert.Equal(t, "mytopic", captured.Topic)
+	})
+
+	t.Run("success with nil data", func(t *testing.T) {
+		t.Skip("json-iterator/reflect2 v1.0.1 panics on Go 1.26 SwissTable maps during cloud event marshaling")
+
+		ps := &stubPubSub{
+			features: []pubsub.Feature{},
+		}
+
+		a := &api{
+			id: "test-app",
+			pubsubAdapter: &stubPubSubAdapter{
+				getPubSubFn: func(name string) pubsub.PubSub { return ps },
+				publishFn: func(req *pubsub.PublishRequest) error {
+					return nil
+				},
+			},
+		}
+
+		resp, err := a.PublishEvent(ctxWithSpan(), &runtimev1pb.PublishEventRequest{
+			PubsubName: "mypubsub",
+			Topic:      "mytopic",
+			Data:       nil,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+	})
+
+	t.Run("publish returns internal error", func(t *testing.T) {
+		t.Skip("json-iterator/reflect2 v1.0.1 panics on Go 1.26 SwissTable maps during cloud event marshaling")
+
+		ps := &stubPubSub{
+			features: []pubsub.Feature{},
+		}
+
+		a := &api{
+			id: "test-app",
+			pubsubAdapter: &stubPubSubAdapter{
+				getPubSubFn: func(name string) pubsub.PubSub { return ps },
+				publishFn: func(req *pubsub.PublishRequest) error {
+					return errors.New("publish failed")
+				},
+			},
+		}
+
+		_, err := a.PublishEvent(ctxWithSpan(), &runtimev1pb.PublishEventRequest{
+			PubsubName: "mypubsub",
+			Topic:      "mytopic",
+			Data:       []byte(`{"msg":"hello"}`),
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("publish with metadata", func(t *testing.T) {
+		t.Skip("json-iterator/reflect2 v1.0.1 panics on Go 1.26 SwissTable maps during cloud event marshaling")
+
+		var captured *pubsub.PublishRequest
+		ps := &stubPubSub{
+			features: []pubsub.Feature{},
+		}
+
+		a := &api{
+			id: "test-app",
+			pubsubAdapter: &stubPubSubAdapter{
+				getPubSubFn: func(name string) pubsub.PubSub { return ps },
+				publishFn: func(req *pubsub.PublishRequest) error {
+					captured = req
+					return nil
+				},
+			},
+		}
+
+		resp, err := a.PublishEvent(ctxWithSpan(), &runtimev1pb.PublishEventRequest{
+			PubsubName: "mypubsub",
+			Topic:      "mytopic",
+			Data:       []byte(`test`),
+			Metadata:   map[string]string{"key": "value"},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.NotNil(t, captured)
+		assert.Equal(t, "value", captured.Metadata["key"])
 	})
 }
