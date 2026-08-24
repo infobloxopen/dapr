@@ -6,13 +6,22 @@
 package actors
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/dapr/components-contrib/state"
+	"github.com/dapr/dapr/pkg/actors/internal"
+	invokev1 "github.com/dapr/dapr/pkg/messaging/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // newMinimalActorsRuntime creates an actorsRuntime with the minimum fields
@@ -33,6 +42,58 @@ func newMinimalActorsRuntime() *actorsRuntime {
 		evaluationChan:  make(chan bool),
 	}
 }
+
+// stubAppChannel implements channel.AppChannel without testify/mock.
+type stubAppChannel struct {
+	invokeMethodFn func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error)
+	baseAddress    string
+}
+
+func (s *stubAppChannel) GetBaseAddress() string {
+	return s.baseAddress
+}
+
+func (s *stubAppChannel) InvokeMethod(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+	if s.invokeMethodFn != nil {
+		return s.invokeMethodFn(ctx, req)
+	}
+	return invokev1.NewInvokeMethodResponse(200, "OK", nil), nil
+}
+
+// nonTransactionalStore implements state.Store but NOT state.TransactionalStore.
+type nonTransactionalStore struct{}
+
+func (n *nonTransactionalStore) Init(metadata state.Metadata) error                              { return nil }
+func (n *nonTransactionalStore) Delete(req *state.DeleteRequest) error                           { return nil }
+func (n *nonTransactionalStore) Get(req *state.GetRequest) (*state.GetResponse, error)           { return &state.GetResponse{}, nil }
+func (n *nonTransactionalStore) Set(req *state.SetRequest) error                                 { return nil }
+func (n *nonTransactionalStore) BulkDelete(req []state.DeleteRequest) error                      { return nil }
+func (n *nonTransactionalStore) BulkGet(req []state.GetRequest) (bool, []state.BulkGetResponse, error) { return false, nil, nil }
+func (n *nonTransactionalStore) BulkSet(req []state.SetRequest) error                            { return nil }
+
+// stubStateStore implements state.Store with configurable error returns.
+type stubStateStore struct {
+	getResp *state.GetResponse
+	getErr  error
+	setErr  error
+	delErr  error
+}
+
+func (s *stubStateStore) Init(metadata state.Metadata) error              { return nil }
+func (s *stubStateStore) Delete(req *state.DeleteRequest) error           { return s.delErr }
+func (s *stubStateStore) Get(req *state.GetRequest) (*state.GetResponse, error) {
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	if s.getResp != nil {
+		return s.getResp, nil
+	}
+	return &state.GetResponse{}, nil
+}
+func (s *stubStateStore) Set(req *state.SetRequest) error                 { return s.setErr }
+func (s *stubStateStore) BulkDelete(req []state.DeleteRequest) error      { return nil }
+func (s *stubStateStore) BulkGet(req []state.GetRequest) (bool, []state.BulkGetResponse, error) { return false, nil, nil }
+func (s *stubStateStore) BulkSet(req []state.SetRequest) error            { return nil }
 
 func TestIsActorLocal(t *testing.T) {
 	a := newMinimalActorsRuntime()
@@ -606,5 +667,601 @@ func TestStopWithNilPlacement(t *testing.T) {
 	// Stop should not panic when placement is nil
 	assert.NotPanics(t, func() {
 		a.Stop()
+	})
+}
+
+// --- Additional coverage tests ---
+
+func TestInitErrors(t *testing.T) {
+	t.Run("empty placement addresses", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.config.PlacementAddresses = []string{}
+
+		err := a.Init()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "address is empty")
+	})
+
+	t.Run("hosted actors with nil store returns incompatible store error", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.config.PlacementAddresses = []string{"localhost:5050"}
+		a.config.HostedActorTypes = []string{"testType"}
+		a.store = nil
+
+		err := a.Init()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), incompatibleStateStore)
+	})
+
+	t.Run("hosted actors with non-transactional store", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.config.PlacementAddresses = []string{"localhost:5050"}
+		a.config.HostedActorTypes = []string{"testType"}
+		a.store = &nonTransactionalStore{}
+
+		err := a.Init()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), incompatibleStateStore)
+	})
+}
+
+func TestCallEmptyTargetAddress(t *testing.T) {
+	a := newMinimalActorsRuntime()
+	a.placement = internal.NewActorPlacement(
+		[]string{"localhost:5050"}, nil,
+		"testApp", "localhost:5000", []string{},
+		func() bool { return true },
+		func() {},
+	)
+
+	req := invokev1.NewInvokeMethodRequest("method1").WithActor("unknownType", "id1")
+
+	resp, err := a.Call(context.Background(), req)
+	assert.Nil(t, resp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error finding address for actor type")
+}
+
+func TestCallRemoteActorWithRetry(t *testing.T) {
+	t.Run("succeeds on first try", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		expectedResp := invokev1.NewInvokeMethodResponse(200, "OK", nil)
+
+		fn := func(ctx context.Context, targetAddress, targetID string, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+			return expectedResp, nil
+		}
+
+		req := invokev1.NewInvokeMethodRequest("method1")
+		resp, err := a.callRemoteActorWithRetry(context.Background(), 3, time.Millisecond, fn, "addr", "id", req)
+		assert.NoError(t, err)
+		assert.Equal(t, expectedResp, resp)
+	})
+
+	t.Run("non-retriable error returns immediately", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		callCount := 0
+
+		fn := func(ctx context.Context, targetAddress, targetID string, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+			callCount++
+			return nil, status.Error(codes.Internal, "internal error")
+		}
+
+		req := invokev1.NewInvokeMethodRequest("method1")
+		_, err := a.callRemoteActorWithRetry(context.Background(), 3, time.Millisecond, fn, "addr", "id", req)
+		assert.Error(t, err)
+		assert.Equal(t, 1, callCount, "should not retry on non-retriable error")
+	})
+
+	t.Run("retriable Unavailable error with connection refresh failure", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.grpcConnectionFn = func(address, id string, namespace string, skipTLS, recreateIfExists, enableSSL bool) (*grpc.ClientConn, error) {
+			return nil, errors.New("connection refresh failed")
+		}
+
+		fn := func(ctx context.Context, targetAddress, targetID string, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+			return nil, status.Error(codes.Unavailable, "unavailable")
+		}
+
+		req := invokev1.NewInvokeMethodRequest("method1")
+		resp, err := a.callRemoteActorWithRetry(context.Background(), 3, time.Millisecond, fn, "addr", "id", req)
+		assert.Nil(t, resp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "connection refresh failed")
+	})
+
+	t.Run("retriable Unauthenticated error with successful refresh exhausts retries", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.grpcConnectionFn = func(address, id string, namespace string, skipTLS, recreateIfExists, enableSSL bool) (*grpc.ClientConn, error) {
+			return nil, nil
+		}
+
+		fn := func(ctx context.Context, targetAddress, targetID string, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+			return nil, status.Error(codes.Unauthenticated, "unauthenticated")
+		}
+
+		req := invokev1.NewInvokeMethodRequest("method1")
+		resp, err := a.callRemoteActorWithRetry(context.Background(), 2, time.Millisecond, fn, "someaddr", "id", req)
+		assert.Nil(t, resp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to invoke target someaddr after 2 retries")
+	})
+}
+
+func TestGetStateNilStore(t *testing.T) {
+	a := newMinimalActorsRuntime()
+	a.store = nil
+
+	_, err := a.GetState(context.Background(), &GetStateRequest{
+		ActorType: "testType",
+		ActorID:   "id1",
+		Key:       "key1",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "state store does not exist")
+}
+
+func TestTransactionalStateOpNilStore(t *testing.T) {
+	a := newMinimalActorsRuntime()
+	a.store = nil
+
+	err := a.TransactionalStateOperation(context.Background(), &TransactionalRequest{
+		ActorType:  "testType",
+		ActorID:    "id1",
+		Operations: []TransactionalOperation{},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "state store does not exist")
+}
+
+func TestGetUpcomingReminderInvokeTimeErrors(t *testing.T) {
+	t.Run("invalid registered time", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.store = fakeStore()
+
+		reminder := &Reminder{
+			ActorType:      "test",
+			ActorID:        "id1",
+			Name:           "rem1",
+			RegisteredTime: "not-a-time",
+			DueTime:        "1s",
+		}
+
+		_, err := a.getUpcomingReminderInvokeTime(reminder)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error parsing reminder registered time")
+	})
+
+	t.Run("invalid due time", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.store = fakeStore()
+
+		reminder := &Reminder{
+			ActorType:      "test",
+			ActorID:        "id1",
+			Name:           "rem1",
+			RegisteredTime: time.Now().UTC().Format(time.RFC3339),
+			DueTime:        "not-a-duration",
+		}
+
+		_, err := a.getUpcomingReminderInvokeTime(reminder)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error parsing reminder due time")
+	})
+
+	t.Run("store error in getReminderTrack", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.store = &stubStateStore{getErr: errors.New("store unavailable")}
+
+		reminder := &Reminder{
+			ActorType:      "test",
+			ActorID:        "id1",
+			Name:           "rem1",
+			RegisteredTime: time.Now().UTC().Format(time.RFC3339),
+			DueTime:        "1s",
+		}
+
+		_, err := a.getUpcomingReminderInvokeTime(reminder)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error getting reminder track")
+	})
+
+	t.Run("invalid last fired time in track", func(t *testing.T) {
+		store := &fakeStateStore{
+			items: map[string][]byte{},
+			lock:  &sync.RWMutex{},
+		}
+		a := newMinimalActorsRuntime()
+		a.store = store
+
+		track := ReminderTrack{LastFiredTime: "not-a-time"}
+		trackData, _ := json.Marshal(track)
+		store.items["test||id1||rem1"] = trackData
+
+		reminder := &Reminder{
+			ActorType:      "test",
+			ActorID:        "id1",
+			Name:           "rem1",
+			RegisteredTime: time.Now().UTC().Format(time.RFC3339),
+			DueTime:        "1s",
+			Period:         "30s",
+		}
+
+		_, err := a.getUpcomingReminderInvokeTime(reminder)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error parsing reminder last fired time")
+	})
+
+	t.Run("valid last fired time with valid period", func(t *testing.T) {
+		store := &fakeStateStore{
+			items: map[string][]byte{},
+			lock:  &sync.RWMutex{},
+		}
+		a := newMinimalActorsRuntime()
+		a.store = store
+
+		lastFired := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+		track := ReminderTrack{LastFiredTime: lastFired}
+		trackData, _ := json.Marshal(track)
+		store.items["test||id1||rem1"] = trackData
+
+		reminder := &Reminder{
+			ActorType:      "test",
+			ActorID:        "id1",
+			Name:           "rem1",
+			RegisteredTime: time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+			DueTime:        "1s",
+			Period:         "30s",
+		}
+
+		invokeTime, err := a.getUpcomingReminderInvokeTime(reminder)
+		assert.NoError(t, err)
+		assert.False(t, invokeTime.IsZero())
+	})
+
+	t.Run("valid last fired time with invalid period", func(t *testing.T) {
+		store := &fakeStateStore{
+			items: map[string][]byte{},
+			lock:  &sync.RWMutex{},
+		}
+		a := newMinimalActorsRuntime()
+		a.store = store
+
+		lastFired := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+		track := ReminderTrack{LastFiredTime: lastFired}
+		trackData, _ := json.Marshal(track)
+		store.items["test||id1||rem1"] = trackData
+
+		reminder := &Reminder{
+			ActorType:      "test",
+			ActorID:        "id1",
+			Name:           "rem1",
+			RegisteredTime: time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+			DueTime:        "1s",
+			Period:         "bad-period",
+		}
+
+		_, err := a.getUpcomingReminderInvokeTime(reminder)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error parsing reminder period")
+	})
+}
+
+func TestEvaluateReminders(t *testing.T) {
+	t.Run("empty hosted actor types", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.config.HostedActorTypes = []string{}
+
+		a.evaluateReminders()
+
+		assert.False(t, a.evaluationBusy)
+	})
+
+	t.Run("reminders loaded but lookup returns empty address", func(t *testing.T) {
+		store := &fakeStateStore{
+			items: map[string][]byte{},
+			lock:  &sync.RWMutex{},
+		}
+
+		reminders := []Reminder{
+			{ActorType: "testType", ActorID: "id1", Name: "rem1", Period: "1s", DueTime: "1s"},
+		}
+		data, _ := json.Marshal(reminders)
+		store.items["actors||testType"] = data
+
+		a := newMinimalActorsRuntime()
+		a.store = store
+		a.config.HostedActorTypes = []string{"testType"}
+		a.config.HostAddress = "localhost"
+		a.config.Port = 5000
+
+		a.placement = internal.NewActorPlacement(
+			[]string{"localhost:5050"}, nil,
+			"testApp", "localhost:5000", []string{"testType"},
+			func() bool { return true },
+			func() {},
+		)
+
+		a.evaluateReminders()
+
+		assert.False(t, a.evaluationBusy)
+		a.remindersLock.RLock()
+		assert.Len(t, a.reminders["testType"], 1)
+		a.remindersLock.RUnlock()
+	})
+
+	t.Run("getRemindersForActorType error is handled gracefully", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.store = &stubStateStore{getErr: errors.New("store error")}
+		a.config.HostedActorTypes = []string{"testType"}
+		a.config.HostAddress = "localhost"
+		a.config.Port = 5000
+
+		a.placement = internal.NewActorPlacement(
+			[]string{"localhost:5050"}, nil,
+			"testApp", "localhost:5000", []string{"testType"},
+			func() bool { return true },
+			func() {},
+		)
+
+		// Should not panic even when store errors
+		a.evaluateReminders()
+
+		assert.False(t, a.evaluationBusy)
+	})
+}
+
+func TestCallLocalActorAdditional(t *testing.T) {
+	t.Run("non-OK status returns error", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.appChannel = &stubAppChannel{
+			invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+				return invokev1.NewInvokeMethodResponse(500, "Internal Server Error", nil), nil
+			},
+		}
+
+		req := invokev1.NewInvokeMethodRequest("method1").WithActor("testType", "id1")
+		resp, err := a.callLocalActor(context.Background(), req)
+		assert.Nil(t, resp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error from actor service")
+	})
+
+	t.Run("invoke method returns error", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.appChannel = &stubAppChannel{
+			invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+				return nil, errors.New("channel invoke failed")
+			},
+		}
+
+		req := invokev1.NewInvokeMethodRequest("method1").WithActor("testType", "id1")
+		resp, err := a.callLocalActor(context.Background(), req)
+		assert.Nil(t, resp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "channel invoke failed")
+	})
+
+	t.Run("existing HTTP extension verb is overridden to PUT", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.appChannel = &stubAppChannel{}
+
+		req := invokev1.NewInvokeMethodRequest("method1").
+			WithActor("testType", "id1").
+			WithHTTPExtension("GET", "")
+
+		resp, err := a.callLocalActor(context.Background(), req)
+		assert.NoError(t, err)
+		assert.NotNil(t, resp)
+	})
+}
+
+func TestDeactivateActorErrors(t *testing.T) {
+	t.Run("invoke method error", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.appChannel = &stubAppChannel{
+			invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+				return nil, errors.New("invoke failed")
+			},
+		}
+
+		err := a.deactivateActor("testType", "id1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invoke failed")
+	})
+
+	t.Run("non-OK status from actor service", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.appChannel = &stubAppChannel{
+			invokeMethodFn: func(ctx context.Context, req *invokev1.InvokeMethodRequest) (*invokev1.InvokeMethodResponse, error) {
+				return invokev1.NewInvokeMethodResponse(500, "Error", nil), nil
+			},
+		}
+
+		err := a.deactivateActor("testType", "id1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error from actor service")
+	})
+
+	t.Run("success removes actor from table", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.appChannel = &stubAppChannel{}
+
+		actorKey := a.constructCompositeKey("testType", "id1")
+		a.actorsTable.Store(actorKey, newActor("testType", "id1"))
+
+		err := a.deactivateActor("testType", "id1")
+		assert.NoError(t, err)
+
+		_, exists := a.actorsTable.Load(actorKey)
+		assert.False(t, exists)
+	})
+}
+
+func TestGetReminderAdditional(t *testing.T) {
+	t.Run("returns nil when no matching reminder exists", func(t *testing.T) {
+		store := &fakeStateStore{
+			items: map[string][]byte{},
+			lock:  &sync.RWMutex{},
+		}
+		a := newMinimalActorsRuntime()
+		a.store = store
+
+		reminders := []Reminder{
+			{ActorType: "testType", ActorID: "other-id", Name: "rem1"},
+		}
+		data, _ := json.Marshal(reminders)
+		store.items["actors||testType"] = data
+
+		r, err := a.GetReminder(context.Background(), &GetReminderRequest{
+			ActorType: "testType",
+			ActorID:   "id1",
+			Name:      "rem1",
+		})
+		assert.NoError(t, err)
+		assert.Nil(t, r)
+	})
+
+	t.Run("store error propagates", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.store = &stubStateStore{getErr: errors.New("store unavailable")}
+
+		r, err := a.GetReminder(context.Background(), &GetReminderRequest{
+			ActorType: "testType",
+			ActorID:   "id1",
+			Name:      "rem1",
+		})
+		require.Error(t, err)
+		assert.Nil(t, r)
+	})
+}
+
+func TestGetReminderTrackStoreError(t *testing.T) {
+	a := newMinimalActorsRuntime()
+	a.store = &stubStateStore{getErr: errors.New("store error")}
+
+	track, err := a.getReminderTrack("actorKey", "name")
+	require.Error(t, err)
+	assert.Nil(t, track)
+}
+
+func TestGetRemindersForActorTypeStoreError(t *testing.T) {
+	a := newMinimalActorsRuntime()
+	a.store = &stubStateStore{getErr: errors.New("store error")}
+
+	reminders, err := a.getRemindersForActorType("testType")
+	require.Error(t, err)
+	assert.Nil(t, reminders)
+}
+
+func TestDeleteReminderEvaluationBusy(t *testing.T) {
+	a := newMinimalActorsRuntime()
+	a.store = fakeStore()
+	a.evaluationBusy = true
+	ch := make(chan bool)
+	a.evaluationChan = ch
+	close(ch)
+
+	err := a.DeleteReminder(context.Background(), &DeleteReminderRequest{
+		ActorType: "testType",
+		ActorID:   "id1",
+		Name:      "rem1",
+	})
+	assert.NoError(t, err)
+}
+
+func TestDrainRebalancedActors(t *testing.T) {
+	t.Run("actor with empty lookup address is not drained", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.config.HostAddress = "10.0.0.1"
+		a.config.Port = 5000
+
+		a.placement = internal.NewActorPlacement(
+			[]string{"localhost:5050"}, nil,
+			"testApp", "10.0.0.1:5000", []string{"testType"},
+			func() bool { return true },
+			func() {},
+		)
+
+		actorKey := a.constructCompositeKey("testType", "id1")
+		a.actorsTable.Store(actorKey, newActor("testType", "id1"))
+
+		a.drainRebalancedActors()
+		time.Sleep(50 * time.Millisecond)
+
+		_, exists := a.actorsTable.Load(actorKey)
+		assert.True(t, exists, "actor should not be drained when LookupActor returns empty")
+	})
+
+	t.Run("empty actors table does not panic", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		a.placement = internal.NewActorPlacement(
+			[]string{"localhost:5050"}, nil,
+			"testApp", "localhost:5000", []string{},
+			func() bool { return true },
+			func() {},
+		)
+
+		assert.NotPanics(t, func() {
+			a.drainRebalancedActors()
+		})
+	})
+}
+
+func TestStopWithPlacement(t *testing.T) {
+	a := newMinimalActorsRuntime()
+	a.placement = internal.NewActorPlacement(
+		[]string{"localhost:5050"}, nil,
+		"testApp", "localhost:5000", []string{},
+		func() bool { return true },
+		func() {},
+	)
+
+	assert.NotPanics(t, func() {
+		a.Stop()
+	})
+}
+
+func TestCreateTimerErrors(t *testing.T) {
+	t.Run("actor not activated", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+
+		err := a.CreateTimer(context.Background(), &CreateTimerRequest{
+			ActorType: "testType",
+			ActorID:   "nonexistent",
+			Name:      "timer1",
+			Period:    "1s",
+			DueTime:   "1s",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "can't create timer for actor")
+	})
+
+	t.Run("invalid period", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		actorKey := a.constructCompositeKey("testType", "id1")
+		a.actorsTable.Store(actorKey, newActor("testType", "id1"))
+
+		err := a.CreateTimer(context.Background(), &CreateTimerRequest{
+			ActorType: "testType",
+			ActorID:   "id1",
+			Name:      "timer1",
+			Period:    "invalid-period",
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("invalid due time", func(t *testing.T) {
+		a := newMinimalActorsRuntime()
+		actorKey := a.constructCompositeKey("testType", "id1")
+		a.actorsTable.Store(actorKey, newActor("testType", "id1"))
+
+		err := a.CreateTimer(context.Background(), &CreateTimerRequest{
+			ActorType: "testType",
+			ActorID:   "id1",
+			Name:      "timer1",
+			Period:    "1s",
+			DueTime:   "invalid-duetime",
+		})
+		require.Error(t, err)
 	})
 }
